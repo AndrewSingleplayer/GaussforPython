@@ -32,6 +32,9 @@
   .app { position: relative; height: 100%; overflow: hidden; }
   #view { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none;
           cursor: grab; }
+  #camera { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  body.ar { background: #000; }
+  body.ar .rail, body.ar #mode, body.ar #spin, body.ar #reset { display: none; }
   #view:active { cursor: grabbing; }
   .strip, .dock { position: absolute; left: 0; right: 0; padding-inline: 16px; pointer-events: none; }
   .strip { top: 0; padding-block: 12px 0; display: flex; flex-wrap: wrap; gap: 8px 16px;
@@ -83,6 +86,7 @@
 </style>
 
 <div class="app">
+  <video id="camera" playsinline muted hidden></video>
   <canvas id="view" aria-label="3D view of the selected scene: drag to turn it, pinch or scroll to zoom"></canvas>
   <div class="progress"><div id="bar"></div></div>
   <header class="strip">
@@ -100,8 +104,9 @@
   </header>
   <div id="status" class="status" hidden></div>
   <div id="ar-note" class="note" hidden>
-    <p>AR puts the scene on top of your camera image. This link can't use the camera, because it opens inside claude.ai.</p>
-    <p id="ar-where">The AR version needs its own web address. It will be on the project's GitHub Pages site.</p>
+    <p>AR puts the scene into your camera image. Turn the phone and the scene stays where it is.</p>
+    <p id="ar-where"></p>
+    <p><a id="ar-link" href="#" target="_blank" rel="noopener" hidden></a></p>
     <button id="ar-close">Close</button>
   </div>
   <footer class="dock">

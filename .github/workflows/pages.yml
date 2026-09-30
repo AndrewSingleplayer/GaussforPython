@@ -1,0 +1,67 @@
+# Builds the web splat viewer (web/) and publishes it on GitHub Pages:
+#   https://andrewsingleplayer.github.io/GaussforPython/
+# The AR mode needs the camera, which works on a page with its own https address (not inside
+# another site). Turn Pages on once: Settings > Pages > Build and deployment > Source: GitHub Actions.
+name: Web viewer (GitHub Pages)
+
+on:
+  push:
+    branches: [claude/quirky-ramanujan-sfipfx]
+    paths: ["web/**", "happ/**", "gaussian/scenes.py", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    outputs:
+      enabled: ${{ steps.pages.outputs.enabled }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Is GitHub Pages turned on?
+        id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/${{ github.repository }}/pages" --silent 2>/dev/null; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=GitHub Pages is off::Turn it on in Settings > Pages > Source: GitHub Actions, then run this workflow again (Actions > Web viewer > Run workflow)."
+          fi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install LLVM (clang, wasm-ld) and NumPy
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q clang lld llvm
+          pip install numpy
+      - name: Build the viewer (HA++ -> WebAssembly, download and pack the scenes)
+        run: |
+          python3 web/build.py
+          rm -f web/dist/scenes/*.hspl
+          du -sh web/dist
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.pages.outputs.enabled == 'true'
+        with:
+          path: web/dist
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.enabled == 'true'
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

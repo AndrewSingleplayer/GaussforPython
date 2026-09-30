@@ -5,7 +5,10 @@
 // The GPU's own blending does the compositing (on iPhones it happens in on-chip tile memory).
 // Sorting and culling run in a Web Worker, in the HA++ module compiled to WebAssembly.
 
+import { LookAroundAR } from "./ar.js";
+
 const $ = (id) => document.getElementById(id);
+const AR_URL = "https://andrewsingleplayer.github.io/GaussforPython/";
 const canvas = $("view");
 const hud = { fps: $("fps"), frame: $("frame"), sort: $("sort"), drawn: $("drawn"), res: $("res"), engine: $("engine"),
               status: $("status"), quality: $("quality"), bar: $("bar"), scene: $("scene-name") };
@@ -133,6 +136,7 @@ let lastSortMs = 0;
 let loadId = 0;
 let engineName = "";
 let dirty = true;                // something changed since the last drawn frame
+const ar = new LookAroundAR($("camera"));
 
 worker.onmessage = (ev) => {
   const m = ev.data;
@@ -253,7 +257,9 @@ canvas.addEventListener("pointermove", (e) => {
   const p = pointers.get(e.pointerId);
   if (!p) return;
   const dx = e.clientX - p.x, dy = e.clientY - p.y;
-  if (pointers.size === 1) {
+  if (ar.on && pointers.size === 1) {
+    ar.turn += dx * 0.01;                   // AR: drag turns the scene where it stands
+  } else if (pointers.size === 1) {
     cam.yaw -= dx * 0.006;
     cam.pitch = Math.max(-1.45, Math.min(1.45, cam.pitch + dy * 0.006));
   } else if (pointers.size === 2) {
@@ -261,6 +267,12 @@ canvas.addEventListener("pointermove", (e) => {
     const other = a === p ? b : a;
     const before = Math.hypot(p.x - other.x, p.y - other.y);
     const after = Math.hypot(e.clientX - other.x, e.clientY - other.y);
+    if (ar.on) {                            // AR: pinch brings the scene nearer or moves it away
+      if (before > 0 && after > 0) ar.zoom = Math.max(0.2, Math.min(5, ar.zoom * before / after));
+      p.x = e.clientX;
+      p.y = e.clientY;
+      return;
+    }
     if (before > 0 && after > 0) cam.dist = Math.max(0.05, Math.min(200, cam.dist * before / after));
     const v = viewRows();
     const k = cam.dist * 0.0012;
@@ -342,7 +354,8 @@ let lastDrawn = 0;
 function frame(now) {
   const dt = Math.min(0.1, (now - prev) / 1000);
   prev = now;
-  if (autoRotate && pointers.size === 0 && now - lastInput > 2500) { cam.yaw += dt * 0.25; dirty = true; }
+  if (autoRotate && !ar.on && pointers.size === 0 && now - lastInput > 2500) { cam.yaw += dt * 0.25; dirty = true; }
+  if (ar.on) dirty = true;                   // the phone is always moving a little
   const [w, h] = resize();
   if (!dirty) {                              // nothing changed: don't redraw (saves the battery)
     updateHud(now, w, h);
@@ -352,14 +365,16 @@ function frame(now) {
   dirty = false;
   lastDrawn = now;
   gl.viewport(0, 0, w, h);
-  gl.clearColor(bg[0], bg[1], bg[2], 1);
+  if (ar.on) gl.clearColor(0, 0, 0, 0);     // transparent: the camera image shows through
+  else gl.clearColor(bg[0], bg[1], bg[2], 1);
   gl.clear(gl.COLOR_BUFFER_BIT);
-  if (scene) {
-    const v = viewRows();
-    const fy = 0.5 * h / Math.tan(cam.fovy / 2);
+  const arView = ar.on && scene ? ar.view(scene.header, w, canvas.clientWidth, canvas.clientHeight) : null;
+  if (scene && (!ar.on || arView)) {
+    const v = arView || viewRows();
+    const fy = arView ? arView.focal : 0.5 * h / Math.tan(cam.fovy / 2);
     const fx = fy;
     const tanX = 0.5 * w / fx, tanY = 0.5 * h / fy;
-    const near = cam.dist * 0.01;
+    const near = arView ? 0.01 * scene.header.distance : cam.dist * 0.01;
     const budget = Math.max(1, Math.round(scene.n * quality.budget));
     const key = [...v.r0, ...v.r1, ...v.r2, ...v.t, tanX, tanY, budget].map((x) => x.toFixed(4)).join(",");
     if (!sortInFlight && key !== sortedFor) {
@@ -412,6 +427,47 @@ function updateHud(now, w, h) {
   }
 }
 
+// ------------------------------------------------------------------ AR
+function arNote(text, link) {
+  $("ar-where").textContent = text;
+  const a = $("ar-link");
+  a.hidden = !link;
+  if (link) { a.href = link; a.textContent = link.replace("https://", ""); }
+  $("ar-note").hidden = false;
+}
+
+async function toggleAR() {
+  if (ar.on) {
+    ar.stop();
+    document.body.classList.remove("ar");
+    $("ar").textContent = "AR";
+    $("ar").setAttribute("aria-pressed", "false");
+    dirty = true;
+    return;
+  }
+  const why = LookAroundAR.blocked();
+  if (why === "frame") {
+    arNote("This page is shown inside another site (here: claude.ai), and that blocks the camera. " +
+           "Open the AR version on its own:", AR_URL);
+    return;
+  }
+  if (why === "insecure") { arNote("The camera needs a secure (https) page.", AR_URL); return; }
+  if (why) { arNote("This browser can't give a web page the camera and the motion sensors. Use Safari on an iPhone."); return; }
+  if (!scene) return;
+  try {
+    await ar.start();
+  } catch (e) {
+    ar.stop();
+    arNote(`AR couldn't start: ${e.message || e}. In Settings > Safari you can allow Camera and Motion & Orientation access.`);
+    return;
+  }
+  $("ar-note").hidden = true;
+  document.body.classList.add("ar");
+  $("ar").textContent = "Exit AR";
+  $("ar").setAttribute("aria-pressed", "true");
+  dirty = true;
+}
+
 // ------------------------------------------------------------------ UI
 async function start() {
   let list = [];
@@ -443,7 +499,7 @@ async function start() {
     dirty = true;
   });
   $("reset").addEventListener("click", resetView);
-  $("ar").addEventListener("click", () => { $("ar-note").hidden = false; });
+  $("ar").addEventListener("click", toggleAR);
   $("ar-close").addEventListener("click", () => { $("ar-note").hidden = true; });
   $("gpu").textContent = renderer.length > 40 ? renderer.slice(0, 38) + "…" : renderer;
   $("gpu").title = renderer;

@@ -69,7 +69,7 @@ def main():
         wasm = happ_build(os.path.join(HERE, "splatweb.ha"), ["web-wasm32"], tmp, quiet=True,
                           bridges=False)["web-wasm32"]
         shutil.copyfile(wasm, os.path.join(DIST, "splatweb.wasm"))
-    for f in ("engine.mjs", "worker.js", "viewer.js"):
+    for f in ("engine.mjs", "worker.js", "viewer.js", "ar.js"):
         shutil.copyfile(os.path.join(HERE, "src", f), os.path.join(DIST, f))
     entries = []
     for name in names:
