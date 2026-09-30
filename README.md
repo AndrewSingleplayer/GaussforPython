@@ -30,6 +30,18 @@ phone runs the same `.so`.*
                                   └─► Metal source ──────► iPhone / Mac GPUs
 ```
 
+## See it on a phone
+
+- **Web viewer (any phone, no install):** `python3 web/build.py`, then serve `web/dist/`. It
+  draws six real 3DGS captures with WebGL2. HA++ compiled to WebAssembly sorts the splats.
+  Details: [web/README.md](web/README.md).
+- **AR in Safari on iPhone, without WebXR:** the same page, published by
+  `.github/workflows/pages.yml` at https://andrewsingleplayer.github.io/GaussforPython/ (once
+  GitHub Pages is on: Settings > Pages > Source: GitHub Actions). The camera image fills the
+  background and the phone's motion sensors keep the scene in place as you turn.
+- **Native iPhone app:** `python3 gaussian/build_ios.py` makes `Splats.ipa` without a Mac (see
+  [gaussian/README.md](gaussian/README.md)).
+
 ## Quick start
 
 You need **Python 3.9+** and **LLVM** (clang + lld), which are free on every OS:
@@ -89,6 +101,8 @@ kernel fade_gpu(s: *Splat, n: u32, k: f32) {
 | `happ/lib/mem.ha` | memory allocators in HA++ (`import "mem.ha";`): Arena, Pool and TLSF, an O(1) general-purpose allocator from real-time systems ([docs](docs/LANGUAGE.md#memory-allocators-happlibmemha)) |
 | `runtime/gpu/` | Vulkan GPU runtime in C. It compiles with plain clang (no SDK) and is linked into Android/Windows/Linux libraries |
 | `gaussian/` | Gaussian splat renderer for AR: the engine in HA++, hosts in Python (PC), Java (Android) and Swift, and a complete iPhone app built into `Splats.ipa` without a Mac ([gaussian/README.md](gaussian/README.md)) |
+| `web/` | the web viewer and browser AR: WebGL2 drawing, HA++ → WebAssembly sorting, real scenes ([web/README.md](web/README.md)) |
+| `research/` | the math, measurements and sources behind the renderers ([research/README.md](research/README.md)) |
 | `examples/ai/nn.ha` | matmul, softmax, layer norm, GELU: a transformer MLP block on GPU and CPU |
 | `tests/` | test suite (see below) |
 | `bench/` | speed comparisons: `bench.py` (HA++ vs C and NumPy), `alloc_bench.py` (allocators vs glibc and a C TLSF) |
