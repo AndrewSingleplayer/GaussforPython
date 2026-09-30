@@ -300,16 +300,11 @@ def simulate(seconds=8.0, arc=150.0, latency=0.05, drift_deg_s=0.4, gyro_noise_d
         if keep_frames:
             r["out"], r["truth"] = out, truth
         return r
-    res = evaluate(truth, out, assumed_height, true_height)
+    res = evaluate(truth, out, assumed_height, true_height, focal)
     if blackout:                  # how far off the spot is once the camera sees again
         after = [e for k, e in enumerate(res["anchor_errors"]) if k / FPS >= blackout[1] + 0.5]
         res["after_blackout_px"] = float(np.nanmedian(after)) if after else float("nan")
         res["relocs"] = out[-1].get("relocs", 0)
-    raw = evaluate(truth, [dict(o, C=o.get("Craw") or o["C"], T=o.get("Traw") or o["T"]) for o in out],
-                   assumed_height, true_height)
-    res["raw_anchor_px_median"] = raw["anchor_px_median"]
-    res["raw_anchor_px_max"] = raw["anchor_px_max"]
-    res["raw_jitter_px"] = raw["jitter_px"]
     if keep_frames:
         res["frames"], res["truth"], res["out"] = frames, truth, out
     return res
@@ -321,16 +316,18 @@ def build_wasm(tmp):
                       bridges=False)["web-wasm32"]
 
 
-def project(C, T, X):
+def project(C, T, X, f=None):
     c = np.asarray(C).T @ (np.asarray(X) - T)
     if c[2] <= 0.05:
         return None
-    return np.array([F * c[0] / c[2] + (W - 1) / 2, F * c[1] / c[2] + (H - 1) / 2])
+    f = f or F
+    return np.array([f * c[0] / c[2] + (W - 1) / 2, f * c[1] / c[2] + (H - 1) / 2])
 
 
-def evaluate(truth, out, assumed_height, true_height):
+def evaluate(truth, out, assumed_height, true_height, true_focal=None):
     """Anchor error: a spot placed at the start (the middle of the first frame) drawn with the
-    tracker's poses vs. where the real spot is. Positions compare after scaling by the height ratio."""
+    tracker's poses (and its focal length: assumed x the scale it measured) vs. where the real spot
+    is in the image (the real focal length). Positions compare after scaling by the height ratio."""
     C0, T0 = truth[0]
     d = C0 @ np.array([0, 0, 1.0])
     s = (-true_height - T0[2]) / d[2]
@@ -342,7 +339,7 @@ def evaluate(truth, out, assumed_height, true_height):
     anchor_est = Te0 + se * de
     scale = assumed_height / true_height
     top = np.array([0, 0, 0.7])
-    errs, pos_errs, states, ms, inliers, vecs = [], [], [], [], [], []
+    errs, pos_errs, states, ms, inliers, vecs, base = [], [], [], [], [], [], []
     for (C, T), o in zip(truth, out):
         states.append(o["state"])
         if o["C"] is None:
@@ -352,16 +349,18 @@ def evaluate(truth, out, assumed_height, true_height):
         Ce = np.array(o["C"]).reshape(3, 3)
         Te = np.array(o["T"])
         pos_errs.append(float(np.linalg.norm(Te / scale - T)))
-        a = project(C, T, anchor_true)
-        b = project(Ce, Te, anchor_est)
-        a2 = project(C, T, anchor_true + top / scale)
-        b2 = project(Ce, Te, anchor_est + top)
+        fe = F * o.get("fScale", 1.0)
+        a = project(C, T, anchor_true, true_focal)
+        b = project(Ce, Te, anchor_est, fe)
+        a2 = project(C, T, anchor_true + top / scale, true_focal)
+        b2 = project(Ce, Te, anchor_est + top, fe)
         if a is None or b is None:
             errs.append(float("nan"))
             vecs.append(None)
             continue
         vecs.append(b - a)
         e = float(np.linalg.norm(a - b))
+        base.append(e)
         if a2 is not None and b2 is not None:
             e = max(e, float(np.linalg.norm(a2 - b2)))
         errs.append(e)
@@ -376,6 +375,8 @@ def evaluate(truth, out, assumed_height, true_height):
         "anchor_px_p95": float(np.nanpercentile(errs, 95)),
         "anchor_px_max": float(np.nanmax(errs)),
         "anchor_px_end": float(errs[-1]),
+        "base_px_median": float(np.median(base)) if base else float("nan"),
+        "base_px_max": float(np.max(base)) if base else float("nan"),
         "position_err_end_m": pos_errs[-1],
         "position_err_max_m": max(pos_errs),
         "path_m": float(sum(np.linalg.norm(truth[i + 1][1] - truth[i][1]) for i in range(len(truth) - 1))),

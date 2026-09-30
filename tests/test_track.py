@@ -91,10 +91,14 @@ class FloorTracking(unittest.TestCase):
         self.assertEqual(r[6], 64)                                          # every second pixel of 16 x 16
 
     def test_wrong_height_and_lens(self):
-        # the phone is 1.15 m above the floor, not 1.35, and the lens sees 72 degrees, not 67:
-        # the scene is drawn a little bigger than planned but stays on its spot
+        # the phone is 1.15 m above the floor, not 1.35, and the lens sees 72 degrees, not 67 (an
+        # iPhone Pro): the scene's base stays on its spot; only its size is off (about 9%, which
+        # shows at its top)
         res = track_sim.simulate(true_height=1.15, true_fov=72)
-        self.check(res, 3.0, 6.0)
+        self.assertEqual(res["lost_frames"], 0)
+        self.assertLess(res["base_px_median"], 1.0, res)
+        self.assertLess(res["base_px_max"], 2.0, res)
+        self.assertLess(res["anchor_px_max"], 10.0, res)
 
 
 if __name__ == "__main__":

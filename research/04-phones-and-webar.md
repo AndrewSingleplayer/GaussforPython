@@ -149,6 +149,15 @@ headless Chromium with a synthetic video, the page found a 0.60 m table within a
 0.63 m) and put the scene on it. The probation also helps without tables: with boxes on the floor
 the median anchor error fell from 1.5 to 0.7 px.
 
+**The lens.** The page assumes the usual iPhone main camera: 26 mm equivalent, 67° across the long
+side. Pro models since the 15 Pro have a 24 mm main camera, about 72°. Simulated with a 72° lens,
+the scene's base stays on its spot just as well (0.48 px median). Only its size looks about 9%
+off, which shows at its top (6 px). The focal length can be measured on the fly: with a wrong one
+the image's turns come out bigger or smaller than the gyroscope's by the same factor. The tracker
+measured 0.926 for a true 0.911. But correcting it mid-session didn't reduce the error (6.6 vs
+6.2 px), because the tracked points were placed with the old one. So it isn't used; a per-model
+default would be the simpler fix, if the page could tell the model (Safari doesn't say).
+
 **Recovery after tracking is lost (floor memory).** While tracking works, every third frame adds
 what the camera sees of the floor to a top-down picture of it (2 cm cells, 12 x 12 m, the running
 mean of up to 15 looks per cell; `floor_map_update` in `track.ha`). Seen from above, a flat floor
