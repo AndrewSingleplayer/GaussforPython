@@ -108,6 +108,27 @@ void main() {
   }
 }`;
 
+// The camera image in AR, drawn from the frame the floor tracker measured (see ar.js), cropped to
+// fill the screen like object-fit: cover.
+const CAM_VS = `#version 300 es
+precision highp float;
+uniform vec2 u_scale;                 // part of the image that shows, per axis
+layout(location = 0) in vec2 a_corner;
+out vec2 v_uv;
+void main() {
+  v_uv = 0.5 + vec2(a_corner.x, -a_corner.y) * 0.5 * u_scale;
+  gl_Position = vec4(a_corner, 0.0, 1.0);
+}`;
+
+const CAM_FS = `#version 300 es
+precision mediump float;
+uniform sampler2D u_image;
+in vec2 v_uv;
+out vec4 frag;
+void main() {
+  frag = vec4(texture(u_image, v_uv).rgb, 1.0);
+}`;
+
 // ------------------------------------------------------------------ WebGL setup
 const gl = canvas.getContext("webgl2", { antialias: false, alpha: true, premultipliedAlpha: true,
                                          powerPreference: "high-performance", depth: false, stencil: false });
@@ -144,6 +165,52 @@ const FU = {};
 for (const name of ["u_r0", "u_r1", "u_r2", "u_t", "u_center", "u_radius", "u_focal", "u_size", "u_kind"]) {
   FU[name] = gl.getUniformLocation(floorProg, name);
 }
+const camProg = gl.createProgram();
+gl.attachShader(camProg, shader(gl.VERTEX_SHADER, CAM_VS));
+gl.attachShader(camProg, shader(gl.FRAGMENT_SHADER, CAM_FS));
+gl.linkProgram(camProg);
+if (!gl.getProgramParameter(camProg, gl.LINK_STATUS)) fail("Shader link error: " + gl.getProgramInfoLog(camProg));
+const CU = { scale: gl.getUniformLocation(camProg, "u_scale"), image: gl.getUniformLocation(camProg, "u_image") };
+const camTex = [0, 1].map(() => {
+  const t = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.activeTexture(gl.TEXTURE0);
+  return t;
+});
+const camSize = [[0, 0], [0, 0]];
+
+// Copies the camera's current frame into texture slot i (called by ar.js with each tracked frame).
+function uploadCameraFrame(i) {
+  const v = $("camera");
+  if (!v.videoWidth) return;
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, camTex[i]);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, v);
+  gl.activeTexture(gl.TEXTURE0);
+  camSize[i] = [v.videoWidth, v.videoHeight];
+}
+
+function drawCamera(i, w, h) {
+  const [vw, vh] = camSize[i];
+  if (!vw) return false;
+  const k = Math.max(w / vw, h / vh);
+  gl.useProgram(camProg);
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, camTex[i]);
+  gl.uniform1i(CU.image, 1);
+  gl.uniform2f(CU.scale, w / (k * vw), h / (k * vh));
+  gl.bindVertexArray(floorVao);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.useProgram(prog);
+  return true;
+}
+
 const floorVao = gl.createVertexArray();
 gl.bindVertexArray(floorVao);
 const floorBuf = gl.createBuffer();
@@ -205,6 +272,7 @@ let loadId = 0;
 let engineName = "";
 let dirty = true;                // something changed since the last drawn frame
 const ar = new LookAroundAR($("camera"));
+ar.frameSink = uploadCameraFrame;
 if (new URLSearchParams(location.search).has("debug")) window.ar = ar;     // for tests
 
 worker.onmessage = (ev) => {
@@ -473,6 +541,7 @@ function frame(now) {
   if (ar.on) gl.clearColor(0, 0, 0, 0);     // transparent: the camera image shows through
   else gl.clearColor(bg[0], bg[1], bg[2], 1);
   gl.clear(gl.COLOR_BUFFER_BIT);
+  if (ar.on && ar.shownSlot >= 0) drawCamera(ar.shownSlot, w, h);    // the frame the pose is for
   const arView = ar.on && scene ? ar.view(scene.stats, w, canvas.clientWidth, canvas.clientHeight) : null;
   if (arView) {
     const f = arView.focal;

@@ -17,6 +17,7 @@ for (let k = 0; k < n; k++) {
     rgba[4 * i + 3] = 255;
   }
   const r = tracker.frame(rgba, w, h, f, meta.times[k], meta.gyro[k], meta.height);
-  out.push({ state: r.state, C: r.C, T: r.T, points: r.points, inliers: r.inliers, ms: r.ms, lag: r.lag, followed: r.followed, fix: r.shiftFix });
+  out.push({ state: r.state, C: r.C, T: r.T, Craw: r.Craw, Traw: r.Traw, points: r.points, inliers: r.inliers,
+             ms: r.ms, lag: r.lag, followed: r.followed, fix: r.shiftFix });
 }
 fs.writeFileSync(outPath, JSON.stringify(out));

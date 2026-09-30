@@ -78,14 +78,18 @@ several degrees in a fast turn. The tracker keeps 2.5 s of readings and of its o
 Every 10 frames it looks for the delay (0-200 ms) that makes the gyroscope's turning between
 frames match the image's turning. It takes the median of the last 7 clear answers.
 
-**Drawing without lag.** The tracker's answer is for the frame it was given. By the time the
-answer comes back, the screen usually shows the next camera frame, and in Low Power Mode that
-is 33 ms later. Drawn with that pose, the scene trails the camera image: 3° at a 90°/s turn,
-about 60 points on an iPhone screen. So the page brings the pose forward to the frame on screen.
-The rotation uses the gyroscope's turning between the two frames, read with the measured camera
-delay. The position uses the tracked velocity. The camera is also asked for 60 fps, which halves
-the time between frames where the phone allows it. The readout shows the camera's real frame
-rate and delay.
+**Camera image and scene in step.** The tracker's pose is for the frame it was given. Safari's
+camera preview (a `<video>`) may already show a newer frame when the answer comes back: 33 ms
+newer in Low Power Mode, 3° at a 90°/s turn, about 60 points on an iPhone screen. Bringing the
+pose forward with the gyroscope removed the lag but made the scene jiggle. The hand shakes about
+10 times a second, and any error in the guessed timing shows as the scene swimming against the
+image. So the page draws the camera image itself, in WebGL. It shows the very frame the tracker
+measured, with that frame's pose, as ARKit apps do; each tracked frame is copied into a texture
+and shown when its answer arrives. Nothing needs timing, and the image shows about one screen
+frame later than Safari's preview would. The pose is not smoothed. On simulated walks the pose's
+own noise moves the scene less than 0.1 pixel from frame to frame, and a One Euro filter made it
+worse, because the lag it adds follows the hand's shake. The camera is also asked for 60 fps. The
+readout shows the camera's real frame rate.
 
 **Measured on simulated walks** (`tests/track_sim.py`). The simulator renders a textured floor
 for a moving camera: 2x supersampled, noise, exposure drift, optional motion blur, rolling

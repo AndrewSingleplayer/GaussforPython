@@ -13,12 +13,12 @@
 // World frame: x east, y north, z up, metres; the camera starts at the origin; the floor is
 // z = -height. Scenes are y up (web/pack.py).
 //
-// Timing: the tracker's pose is for the camera frame it was given, which is already one frame old
-// when the answer comes back (the screen shows the next one by then). So the scene is drawn with
-// the pose brought forward to the frame on screen: the gyroscope's turning between the two frames
-// (read with the camera delay the tracker measured), and the tracked velocity for the position.
-
-import { orthonormalize } from "./tracker.mjs";
+// Camera image and scene in step: the page draws the camera image itself (WebGL), and it draws the
+// very frame the tracker measured, with that frame's pose (like ARKit apps do). Safari's own
+// camera preview (the <video>) can show a newer frame than the one a pose is for; any guess about
+// how much newer shows as lag or jiggle. So each frame handed to the tracker is also copied into a
+// texture (frameSink), and it is shown when the tracker's answer for it comes back. The <video>
+// shows only until then, or when there is no tracker.
 
 const D2R = Math.PI / 180;
 // iPhone main (wide) camera: 26 mm equivalent focal length -> about 67 degrees across the long
@@ -86,9 +86,10 @@ export class LookAroundAR {
     this.track = null;               // the floor tracker's last answer
     this.trackError = "";
     this.readings = [];
-    this.history = [];               // motion sensor readings of the last 1.5 s: { t, C }
-    this.shownTime = 0;              // time of the camera frame on screen
-    this.velocity = [0, 0, 0];       // metres per ms, from the tracker
+    this.frameSink = null;           // (slot) => copies the video's current frame into texture slot
+    this.shownSlot = -1;             // camera texture to draw (-1: none yet, the <video> shows)
+    this.pendingSlot = -1;           // texture holding the frame the tracker is working on
+    this.lastFrame = 0;
     this.reset();
   }
 
@@ -124,11 +125,8 @@ export class LookAroundAR {
     this.onOrient = (e) => {
       if (e.alpha === null || e.beta === null || e.gamma === null) return;
       this.R = deviceRotation(e.alpha, e.beta, e.gamma);
-      const reading = { t: e.timeStamp || performance.now(), C: cameraToWorld(this.R, this.screenAngle()) };
-      this.readings.push(reading);
+      this.readings.push({ t: e.timeStamp || performance.now(), C: cameraToWorld(this.R, this.screenAngle()) });
       if (this.readings.length > 120) this.readings.shift();
-      this.history.push(reading);
-      while (this.history.length > 2 && this.history[0].t < reading.t - 1500) this.history.shift();
     };
     window.addEventListener("deviceorientation", this.onOrient);
     this.on = true;
@@ -145,6 +143,7 @@ export class LookAroundAR {
     this.video.hidden = true;
     this.R = null;
     this.track = null;
+    this.shownSlot = this.pendingSlot = -1;
     if (this.worker) this.worker.postMessage({ type: "reset" });
     this.reset();
   }
@@ -169,8 +168,12 @@ export class LookAroundAR {
     const next = () => {
       if (!this.on) return;
       const frame = (now) => {
-        if (this.shownTime) this.frameMs = 0.9 * (this.frameMs || now - this.shownTime) + 0.1 * (now - this.shownTime);
-        this.shownTime = now;
+        if (this.lastFrame) this.frameMs = 0.9 * (this.frameMs || now - this.lastFrame) + 0.1 * (now - this.lastFrame);
+        this.lastFrame = now;
+        if (this.trackError && this.frameSink) {          // no tracker: show every frame as it comes
+          this.frameSink(0);
+          this.shownSlot = 0;
+        }
         this.sendFrame(now);
         next();
       };
@@ -197,6 +200,10 @@ export class LookAroundAR {
     const gyro = this.readings;
     this.readings = [];
     this.busy = true;
+    if (this.frameSink) {                                  // keep this frame to show with its pose
+      this.pendingSlot = this.shownSlot === 0 ? 1 : 0;
+      this.frameSink(this.pendingSlot);
+    }
     this.worker.postMessage({ type: "frame", rgba: img.data.buffer, w, h, f, time, gyro, height: this.height },
                             [img.data.buffer]);
   }
@@ -204,33 +211,10 @@ export class LookAroundAR {
   onTrack(m) {
     this.busy = false;
     if (m.type === "error") { this.trackError = m.message; return; }
-    if (m.type !== "pose" || !this.on || !m.C) return;
-    const prev = this.track;
-    if (prev && prev.state === "tracking" && m.state === "tracking" && m.time > prev.time) {
-      const dt = m.time - prev.time;
-      this.velocity = this.velocity.map((v, i) => 0.5 * v + 0.5 * (m.T[i] - prev.T[i]) / dt);
-    } else if (m.state !== "tracking") {
-      this.velocity = [0, 0, 0];
-    }
-    this.track = m;
-  }
-
-  // The gyroscope's camera rotation at time t (ms), between the two nearest readings.
-  gyroAt(t) {
-    const g = this.history;
-    if (!g.length) return null;
-    if (t <= g[0].t) return g[0].C;
-    if (t >= g[g.length - 1].t) return g[g.length - 1].C;
-    let i = g.length - 1;
-    while (i > 0 && g[i - 1].t > t) i--;
-    const a = g[i - 1], b = g[i];
-    const k = (t - a.t) / Math.max(1e-6, b.t - a.t);
-    return orthonormalize(a.C.map((x, j) => x + k * (b.C[j] - x)));
-  }
-
-  // How far (ms) the frame on screen is ahead of the frame the tracker answered for.
-  ahead() {
-    return this.track ? Math.max(0, Math.min(150, this.shownTime - this.track.time)) : 0;
+    if (m.type !== "pose" || !this.on) return;
+    if (this.pendingSlot >= 0) this.shownSlot = this.pendingSlot;   // the frame this answer is for
+    this.pendingSlot = -1;
+    if (m.C) this.track = m;
   }
 
   // Tracking state for the hints and the readout: "tracking", "searching" (not enough floor
@@ -255,21 +239,14 @@ export class LookAroundAR {
     return fVideo * k * (canvasW / cssW);
   }
 
-  // Camera -> world rotation: the tracker's (for the camera frame on screen) or the gyroscope's.
+  // Camera -> world rotation: the tracker's (for the camera frame drawn) or the gyroscope's.
   camera() {
-    if (this.track) {
-      const lag = this.track.lag ?? 60;
-      const g0 = this.gyroAt(this.track.time - lag), g1 = this.gyroAt(this.track.time + this.ahead() - lag);
-      if (!g0 || !g1) return this.track.C;
-      return orthonormalize(mul(this.track.C, mul(transpose(g0), g1)));
-    }
+    if (this.track) return this.track.C;
     return this.R ? cameraToWorld(this.R, this.screenAngle()) : null;
   }
 
   position() {
-    if (!this.track) return [0, 0, 0];
-    const dt = this.ahead();
-    return this.track.T.map((x, i) => x + this.velocity[i] * dt);
+    return this.track ? this.track.T : [0, 0, 0];
   }
 
   // Put the scene where the tap at canvas pixel (x, y) meets the floor. Returns false if it doesn't.

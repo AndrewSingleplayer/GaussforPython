@@ -223,7 +223,7 @@ class Walk:
 def simulate(seconds=8.0, arc=150.0, latency=0.05, drift_deg_s=0.4, gyro_noise_deg=0.05,
              assumed_height=1.35, true_height=1.35, contrast=1.0, seed=3, keep_frames=False,
              true_fov=67.0, exposure_ms=0.0, boxes=False, turns=0.0, floor="terrazzo", readout_ms=0.0,
-             crouch=0.0):
+             crouch=0.0, noise=2.0):
     rng = np.random.default_rng(seed)
     tex, texel = floor_texture(seed=seed, contrast=contrast, kind=floor)
     levels = texture_levels(tex)
@@ -259,14 +259,14 @@ def simulate(seconds=8.0, arc=150.0, latency=0.05, drift_deg_s=0.4, gyro_noise_d
                 Cs, Ts = walk.pose(tb)
                 img[bands[b]:bands[b + 1]] = render(levels, texel, Cs, Ts, -true_height, gain, 0, None, 2, focal,
                                                     box_list, (bands[b], bands[b + 1]))
-            frames[k] = np.clip(np.round(img + rng.normal(0, 2.0, img.shape)), 0, 255).astype(np.uint8)
+            frames[k] = np.clip(np.round(img + rng.normal(0, noise, img.shape)), 0, 255).astype(np.uint8)
         elif exposure_ms > 0:                              # motion blur: average over the exposure
             sub = [walk.pose(t - exposure_ms / 1000 * (j / 3)) for j in range(4)]
             img = np.mean([render(levels, texel, Cs, Ts, -true_height, gain, 0, None, 1, focal, box_list)
                            for Cs, Ts in sub], axis=0)
-            frames[k] = np.clip(np.round(img + rng.normal(0, 2.0, img.shape)), 0, 255).astype(np.uint8)
+            frames[k] = np.clip(np.round(img + rng.normal(0, noise, img.shape)), 0, 255).astype(np.uint8)
         else:
-            frames[k] = render(levels, texel, C, T, -true_height, gain, 2.0, rng, 2, focal, box_list)
+            frames[k] = render(levels, texel, C, T, -true_height, gain, noise, rng, 2, focal, box_list)
         truth.append((C, T))
         arrive = t + latency
         new = []
@@ -286,6 +286,11 @@ def simulate(seconds=8.0, arc=150.0, latency=0.05, drift_deg_s=0.4, gyro_noise_d
             out = json.load(fh)
 
     res = evaluate(truth, out, assumed_height, true_height)
+    raw = evaluate(truth, [dict(o, C=o.get("Craw") or o["C"], T=o.get("Traw") or o["T"]) for o in out],
+                   assumed_height, true_height)
+    res["raw_anchor_px_median"] = raw["anchor_px_median"]
+    res["raw_anchor_px_max"] = raw["anchor_px_max"]
+    res["raw_jitter_px"] = raw["jitter_px"]
     if keep_frames:
         res["frames"], res["truth"], res["out"] = frames, truth, out
     return res
@@ -318,7 +323,7 @@ def evaluate(truth, out, assumed_height, true_height):
     anchor_est = Te0 + se * de
     scale = assumed_height / true_height
     top = np.array([0, 0, 0.7])
-    errs, pos_errs, states, ms, inliers = [], [], [], [], []
+    errs, pos_errs, states, ms, inliers, vecs = [], [], [], [], [], []
     for (C, T), o in zip(truth, out):
         states.append(o["state"])
         if o["C"] is None:
@@ -334,13 +339,19 @@ def evaluate(truth, out, assumed_height, true_height):
         b2 = project(Ce, Te, anchor_est + top)
         if a is None or b is None:
             errs.append(float("nan"))
+            vecs.append(None)
             continue
+        vecs.append(b - a)
         e = float(np.linalg.norm(a - b))
         if a2 is not None and b2 is not None:
             e = max(e, float(np.linalg.norm(a2 - b2)))
         errs.append(e)
     errs = np.array(errs)
+    # jitter: how much the drawn spot wobbles around the real one from one frame to the next
+    steps = [np.linalg.norm(vecs[k] - vecs[k - 1]) for k in range(1, len(vecs))
+             if vecs[k] is not None and vecs[k - 1] is not None]
     return {
+        "jitter_px": float(np.sqrt(np.mean(np.square(steps)))) if steps else float("nan"),
         "frames": len(out),
         "anchor_px_median": float(np.nanmedian(errs)),
         "anchor_px_p95": float(np.nanpercentile(errs, 95)),
@@ -398,11 +409,12 @@ def main():
     ap.add_argument("--floor", default="terrazzo", choices=["terrazzo", "tiles", "planks", "carpet"])
     ap.add_argument("--readout-ms", type=float, default=0.0, help="rolling shutter")
     ap.add_argument("--crouch", type=float, default=0.0, help="go this many metres down and up again")
+    ap.add_argument("--noise", type=float, default=2.0, help="camera noise, grey levels (RMS)")
     args = ap.parse_args()
     res = simulate(args.seconds, args.arc, args.latency, true_height=args.true_height,
                    contrast=args.contrast, seed=args.seed, keep_frames=bool(args.gif),
                    true_fov=args.true_fov, exposure_ms=args.exposure_ms, boxes=args.boxes, turns=args.turns,
-                   floor=args.floor, readout_ms=args.readout_ms, crouch=args.crouch)
+                   floor=args.floor, readout_ms=args.readout_ms, crouch=args.crouch, noise=args.noise)
     for k, v in res.items():
         if k not in ("anchor_errors", "frames", "truth", "out"):
             print(f"{k:22s} {v:.3f}" if isinstance(v, float) else f"{k:22s} {v}")
