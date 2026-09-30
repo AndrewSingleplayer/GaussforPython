@@ -17,8 +17,8 @@ self.onmessage = async (ev) => {
   if (m.type === "reset") {
     tracker.reset();
   } else if (m.type === "frame") {
-    const r = tracker.frame(new Uint8Array(m.rgba), m.w, m.h, m.f, m.time, m.gyro, m.height);
+    const r = tracker.frame(new Uint8Array(m.rgba), m.w, m.h, m.f, m.time, m.gyro, m.height, m.box);
     self.postMessage({ type: "pose", state: r.state, C: r.C, T: r.T, points: r.points, inliers: r.inliers,
-                       ms: r.ms, lag: r.lag, time: m.time });
+                       ms: r.ms, lag: r.lag, time: m.time, light: r.light });
   }
 };

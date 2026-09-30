@@ -91,6 +91,22 @@ own noise moves the scene less than 0.1 pixel from frame to frame, and a One Eur
 worse, because the lag it adds follows the hand's shake. The camera is also asked for 60 fps. The
 readout shows the camera's real frame rate.
 
+**Light.** A capture carries the light of the room it was filmed in, usually bright and neutral.
+In a dimmer or warmer room it looks pasted in. So, like ARKit's light estimation, the tracker
+measures each camera frame's mean colour (`light_stats` in `track.ha`), and the colour of the
+floor under the scene. The scene is then drawn to match. Its colours are scaled by the room's
+brightness (relative to a normally exposed frame, to the power 0.75, between 0.45× and 1.2×) and
+half-tinted by the room's colour cast. The bottom 8 cm darken toward the floor (contact
+shading), and the bottom 30 cm pick up some of the floor's colour (bounce light). These are soft
+edits made per splat in the vertex shader as it is drawn. The scene file and the decoded splats
+are never changed, and "Light: original" shows them untouched.
+
+**Placing and moving.** The first tap puts the scene on the ring, wherever the finger is. The
+scene's base is the middle of its bottom slice (the part that touches the floor), so a leaning
+scene still stands centred on the ring. Afterwards, two fingers slide it along the floor: the
+floor points under the fingers' midpoint before and after the move give the shift. Pinch resizes
+it, twist and one-finger drag turn it, and a tap moves it.
+
 **Measured on simulated walks** (`tests/track_sim.py`). The simulator renders a textured floor
 for a moving camera: 2x supersampled, noise, exposure drift, optional motion blur, rolling
 shutter, boxes standing on the floor. The simulated gyroscope has delay, drift and noise. The

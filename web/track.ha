@@ -6,6 +6,7 @@
 //   corners       points worth following (Shi-Tomasi): the best one in each free cell of a grid
 //   track_points  pyramidal Lucas-Kanade optical flow: where points of one frame went in the next
 //   solve_pose    the camera's rotation and position from points on the floor whose place is known
+//   light_stats   the light in the frame (brightness, colour), to draw the scene to match it
 //
 // Images are 8-bit grey, row by row, with pixel centres at integer coordinates. A pyramid is its
 // levels one after another: level l is (w >> l) x (h >> l) pixels, each the mean of 2x2 pixels
@@ -146,6 +147,44 @@ export fn corners(img: *u8, w: u32, h: u32, cell: u32, skip: *u8, border: u32,
         }
     }
     return m;
+}
+
+// ------------------------------------------------------------------ light
+
+// The light in a camera frame, so the scene can be drawn to match it: the mean red, green and blue
+// of the whole frame, and of the box (x0, y0)-(x1, y1) (the floor under the scene), over every
+// second pixel in each direction. out: r, g, b of the frame, r, g, b of the box (0-255), pixels in
+// the box.
+export fn light_stats(rgba: *u8, w: u32, h: u32, x0: u32, y0: u32, x1: u32, y1: u32, out: *f32) {
+    var s = vec3(0.0);
+    var sb = vec3(0.0);
+    var n: u32 = 0;
+    var nb: u32 = 0;
+    var y: u32 = 0;
+    while y < h {
+        var x: u32 = 0;
+        while x < w {
+            let p = rgba + (y * w + x) * 4;
+            let c = vec3(p[0] as f32, p[1] as f32, p[2] as f32);
+            s += c;
+            n += 1;
+            if x >= x0 && x < x1 && y >= y0 && y < y1 {
+                sb += c;
+                nb += 1;
+            }
+            x += 2;
+        }
+        y += 2;
+    }
+    let m = s / max(n as f32, 1.0);
+    let mb = sb / max(nb as f32, 1.0);
+    out[0] = m.x;
+    out[1] = m.y;
+    out[2] = m.z;
+    out[3] = mb.x;
+    out[4] = mb.y;
+    out[5] = mb.z;
+    out[6] = nb as f32;
 }
 
 // ------------------------------------------------------------------ whole-image motion

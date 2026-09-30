@@ -22,6 +22,11 @@ uniform usampler2D u_data;          // 2 texels per splat: position, colour | sc
 uniform vec3 u_r0, u_r1, u_r2, u_t; // world -> camera (x right, y down, z forward)
 uniform vec2 u_focal, u_size, u_lim;
 uniform float u_near;
+// AR light matching, applied here to each splat as it is drawn (the scene data is never changed):
+// u_light: gain for the colours (room brightness and colour cast); u_floor: (scene y of the floor,
+// metres per scene unit, 1 in AR / 0 otherwise); u_floorTint: the floor's colour cast.
+uniform vec3 u_light, u_floorTint;
+uniform vec3 u_floor;
 layout(location = 0) in vec2 a_corner;
 layout(location = 1) in uint a_index;
 out vec4 v_color;
@@ -59,7 +64,10 @@ void main() {
   vec2 px = center + a_corner.x * r1 * e1 + a_corner.y * r2 * e2;
   gl_Position = vec4(px.x / u_size.x * 2.0 - 1.0, 1.0 - px.y / u_size.y * 2.0, 0.0, 1.0);
   v_uv = a_corner * vec2(r1 * inversesqrt(l1), r2 * inversesqrt(l2));
-  v_color = color;
+  float hgt = (p.y - u_floor.x) * u_floor.y;          // height above the floor, metres
+  float ao = mix(1.0, mix(0.55, 1.0, smoothstep(0.0, 0.08, hgt)), u_floor.z);   // darker where it touches
+  float bounce = u_floor.z * 0.35 * (1.0 - smoothstep(0.0, 0.3, hgt));        // lit by the floor's colour
+  v_color = vec4(min(color.rgb * u_light * ao * mix(vec3(1.0), u_floorTint, bounce), vec3(1.0)), color.a);
 }`;
 
 const FS = `#version 300 es
@@ -153,7 +161,8 @@ gl.linkProgram(prog);
 if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) fail("Shader link error: " + gl.getProgramInfoLog(prog));
 gl.useProgram(prog);
 const U = {};
-for (const name of ["u_data", "u_r0", "u_r1", "u_r2", "u_t", "u_focal", "u_size", "u_lim", "u_near"]) {
+for (const name of ["u_data", "u_r0", "u_r1", "u_r2", "u_t", "u_focal", "u_size", "u_lim", "u_near",
+                    "u_light", "u_floor", "u_floorTint"]) {
   U[name] = gl.getUniformLocation(prog, name);
 }
 const floorProg = gl.createProgram();
@@ -272,8 +281,12 @@ let loadId = 0;
 let engineName = "";
 let dirty = true;                // something changed since the last drawn frame
 const ar = new LookAroundAR($("camera"));
+let lightMatch = true;                   // AR: draw the scene in the room's light (or as captured)
 ar.frameSink = uploadCameraFrame;
-if (new URLSearchParams(location.search).has("debug")) window.ar = ar;     // for tests
+if (new URLSearchParams(location.search).has("debug")) {                  // for tests
+  window.ar = ar;
+  window.viewerScene = () => scene;
+}
 
 worker.onmessage = (ev) => {
   const m = ev.data;
@@ -408,8 +421,15 @@ canvas.addEventListener("pointermove", (e) => {
     const other = a === p ? b : a;
     const before = Math.hypot(p.x - other.x, p.y - other.y);
     const after = Math.hypot(e.clientX - other.x, e.clientY - other.y);
-    if (ar.on) {                            // AR: pinch makes the scene bigger or smaller
+    if (ar.on) {                            // AR: two fingers slide it along the floor, pinch resizes, twist turns
       if (before > 0 && after > 0) ar.zoom = Math.max(0.2, Math.min(5, ar.zoom * after / before));
+      ar.turn -= Math.atan2(e.clientY - other.y, e.clientX - other.x) - Math.atan2(p.y - other.y, p.x - other.x);
+      const r = canvas.getBoundingClientRect();
+      const k = canvas.width / r.width;
+      const f = ar.focal(canvas.width, canvas.clientWidth, canvas.clientHeight);
+      const mid = (x, y) => [((x + other.x) / 2 - r.left) * k, ((y + other.y) / 2 - r.top) * k];
+      const [x0, y0] = mid(p.x, p.y), [x1, y1] = mid(e.clientX, e.clientY);
+      ar.slide(x0, y0, x1, y1, canvas.width, canvas.height, f);
       p.x = e.clientX;
       p.y = e.clientY;
       return;
@@ -549,7 +569,7 @@ function frame(now) {
     if (arView.shadow) drawFloor(arView.world, arView.shadow.center, arView.shadow.radius, 1, f, f, w, h);
     const st = ar.trackState();
     if (arView.draw) {
-      arHint(st === "tracking" ? "Walk around it · drag to turn · pinch to resize"
+      arHint(st === "tracking" ? "Walk around it · drag to turn · two fingers to slide and resize"
            : st === "rotation" ? "Drag to turn it · pinch to resize · tap the floor to move it"
            : "Lost the floor: point the phone at it and move slowly");
     } else {
@@ -584,6 +604,10 @@ function frame(now) {
       gl.uniform2f(U.u_size, w, h);
       gl.uniform2f(U.u_lim, 1.3 * tanX, 1.3 * tanY);
       gl.uniform1f(U.u_near, arView ? 0.03 : near);
+      const lit = arView && lightMatch ? arView.light : null;
+      gl.uniform3fv(U.u_light, lit ? lit.gain : [1, 1, 1]);
+      gl.uniform3fv(U.u_floorTint, lit ? lit.floorTint : [1, 1, 1]);
+      gl.uniform3f(U.u_floor, scene.stats.ground, arView ? arView.scale : 1, lit ? 1 : 0);
       gl.bindVertexArray(vao);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, drawCount);
     }
@@ -617,7 +641,7 @@ function updateHud(now, w, h) {
     hud.track.hidden = !ar.on;
     if (ar.on) {
       hud.track.textContent = ar.trackError ? "floor tracking off (rotation only)"
-        : t ? `floor: ${t.inliers || t.points} points, ${t.ms.toFixed(1)} ms · camera ${Math.round(1000 / (ar.frameMs || 33))} fps, ${Math.round(t.lag)} ms late`
+        : t ? `floor: ${t.inliers || t.points} points, ${t.ms.toFixed(1)} ms · camera ${Math.round(1000 / (ar.frameMs || 33))} fps, ${Math.round(t.lag)} ms late · light ${lightMatch ? ar.lighting().exposure.toFixed(2) + "×" : "original"}`
         : "floor: starting";
     }
     hud.quality.textContent = quality.mode === "auto"
@@ -706,6 +730,11 @@ async function start() {
   });
   $("reset").addEventListener("click", resetView);
   $("ar").addEventListener("click", toggleAR);
+  $("light").addEventListener("click", () => {
+    lightMatch = !lightMatch;
+    $("light").textContent = lightMatch ? "Light: room" : "Light: original";
+    $("light").setAttribute("aria-pressed", String(lightMatch));
+  });
   $("ar-close").addEventListener("click", () => { $("ar-note").hidden = true; });
   $("gpu").textContent = renderer.length > 40 ? renderer.slice(0, 38) + "…" : renderer;
   $("gpu").title = renderer;

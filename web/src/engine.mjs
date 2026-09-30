@@ -22,7 +22,9 @@ export function parseHeader(buf) {
 }
 
 // Where the scene's base is, where its middle is and how tall it is (y is up), ignoring the
-// outermost 2% of splats: used to stand a scene on the floor in AR at a real size.
+// outermost 2% of splats: used to stand a scene on the floor in AR at a real size. The middle (cx,
+// cz) is that of the bottom slice, the part that touches the floor, so a scene that leans (a head
+// sticking out) still stands centred on the spot it is put on.
 export function sceneStats(pos, n) {
   const step = Math.max(1, Math.floor(n / 20000));
   const xs = [], ys = [], zs = [];
@@ -33,10 +35,16 @@ export function sceneStats(pos, n) {
   }
   const at = (a, q) => a[Math.min(a.length - 1, Math.floor(q * (a.length - 1)))];
   const sorted = (a) => a.slice().sort((u, v) => u - v);
-  const cx = at(sorted(xs), 0.5), cz = at(sorted(zs), 0.5);
-  const rs = sorted(xs.map((x, i) => Math.hypot(x - cx, zs[i] - cz)));
   const ysSorted = sorted(ys);
-  return { ground: at(ysSorted, 0.02), top: at(ysSorted, 0.98), cx, cz, radius: at(rs, 0.9) };
+  const ground = at(ysSorted, 0.02), top = at(ysSorted, 0.98);
+  const band = ground + 0.12 * (top - ground);
+  let bx = [], bz = [];
+  ys.forEach((y, i) => { if (y >= ground && y <= band) { bx.push(xs[i]); bz.push(zs[i]); } });
+  if (bx.length < 30) { bx = xs; bz = zs; }
+  const mid = (a) => { const s = sorted(a); return 0.5 * (at(s, 0.1) + at(s, 0.9)); };
+  const cx = mid(bx), cz = mid(bz);
+  const rs = sorted(xs.map((x, i) => Math.hypot(x - cx, zs[i] - cz)));
+  return { ground, top, cx, cz, radius: at(rs, 0.9) };
 }
 
 // camera: { rot: [r0 x3, r1 x3, r2 x3] (world -> camera rows: right, down, forward), t: [x, y, z],

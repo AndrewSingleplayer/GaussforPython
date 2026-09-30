@@ -35,6 +35,7 @@
   #camera { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
   body.ar { background: #000; }
   body.ar .rail, body.ar #mode, body.ar #spin, body.ar #reset { display: none; }
+  body:not(.ar) .ar-only { display: none; }
   #view:active { cursor: grabbing; }
   .strip, .dock { position: absolute; left: 0; right: 0; padding-inline: 16px; pointer-events: none; }
   .strip { top: 0; padding-block: 12px 0; display: flex; flex-wrap: wrap; gap: 8px 16px;
@@ -120,6 +121,7 @@
       <button id="spin" aria-pressed="true">Spin</button>
       <button id="reset">Reset</button>
       <button id="ar">AR</button>
+      <button id="light" class="ar-only" aria-pressed="true">Light: room</button>
     </div>
     <p class="meta"><span id="track-info" hidden></span> <span id="quality">Auto</span> · sorted by <span id="engine">…</span> · <span id="gpu"></span> · scenes: Babylon.js Assets, CC BY 4.0</p>
   </footer>

@@ -191,7 +191,7 @@ export class FloorTracker {
     take("obs", 8 * MAX_POINTS); take("xyz", 12 * MAX_POINTS); take("wts", 4 * MAX_POINTS);
     take("resid", 4 * MAX_POINTS); take("pose", 48); take("prm", 48);
     const sw = w >> SHIFT_LEVEL, sh = h >> SHIFT_LEVEL;
-    take("hpA", 4 * sw * sh); take("hpB", 4 * sw * sh); take("shift", 16);
+    take("hpA", 4 * sw * sh); take("hpB", 4 * sw * sh); take("shift", 16); take("light", 32);
     const have = this.memory.buffer.byteLength;
     if (o > have) this.memory.grow(Math.ceil((o - have) / 65536));
     const buf = this.memory.buffer;
@@ -202,7 +202,7 @@ export class FloorTracker {
       src: f32("src", 2 * MAX_POINTS), dst: f32("dst", 2 * MAX_POINTS), back: f32("back", 2 * MAX_POINTS),
       st1: u8("st1", MAX_POINTS), st2: u8("st2", MAX_POINTS), err1: f32("err1", MAX_POINTS),
       obs: f32("obs", 2 * MAX_POINTS), xyz: f32("xyz", 3 * MAX_POINTS), wts: f32("wts", MAX_POINTS),
-      resid: f32("resid", MAX_POINTS), pose: f32("pose", 12), prm: f32("prm", 12), shift: f32("shift", 4),
+      resid: f32("resid", MAX_POINTS), pose: f32("pose", 12), prm: f32("prm", 12), shift: f32("shift", 4), light: f32("light", 7),
       prmU: new Uint32Array(buf, at.prm, 12),
     };
     this.at = at;
@@ -221,8 +221,10 @@ export class FloorTracker {
   // One camera frame. rgba: w x h RGBA pixels; f: focal length in pixels of this image; time: the
   // frame's time (ms, the clock of the gyroscope readings); gyro: the motion sensor readings that
   // arrived since the last frame, [{ t, C }] with C the camera -> world rotation; height: the
-  // phone's height above the floor when tracking starts (metres). Returns the pose for this frame.
-  frame(rgba, w, h, f, time, gyro, height = 1.35) {
+  // phone's height above the floor when tracking starts (metres); box: [x0, y0, x1, y1], pixels of
+  // this image where the floor under the scene is (for the light there). Returns the pose for this
+  // frame and the light in it.
+  frame(rgba, w, h, f, time, gyro, height = 1.35, box = null) {
     const t0 = performance.now();
     for (const g of gyro) this.gyro.push(g);
     while (this.gyro.length > 2 && this.gyro[0].t < time - HISTORY_MS) this.gyro.shift();
@@ -238,6 +240,10 @@ export class FloorTracker {
     this.cy = (h - 1) / 2;
     this.height = height;
     this.mem.rgba.set(rgba.subarray(0, 4 * w * h));
+    const b = (box || [0, 0, 0, 0]).map((v, i) => Math.max(0, Math.min(i % 2 ? h : w, Math.round(v))));
+    this.ex.light_stats(this.at.rgba, w, h, b[0], b[1], b[2], b[3], this.at.light);
+    const L = this.mem.light;
+    const light = { frame: [L[0], L[1], L[2]], floor: L[6] > 20 ? [L[3], L[4], L[5]] : null };
     this.ex.gray_image(this.at.rgba, w * h, this.cur);
     this.ex.pyramid(this.cur, w, h, LEVELS);
     this.ex.highpass(this.cur + this.ex.level_offset(w, h, SHIFT_LEVEL), this.sw, this.sh, this.hpCur, this.at.tmp);
@@ -266,7 +272,7 @@ export class FloorTracker {
       this.seen = [];
     }
     return { state, ok: state === "tracking" || state === "started", C: this.C.slice(), T: this.T.slice(),
-             points: this.n, inliers: this.inliers, ms: performance.now() - t0, lag: this.lag,
+             points: this.n, inliers: this.inliers, ms: performance.now() - t0, lag: this.lag, light,
              followed: this.followed, shiftFix: this.shiftFix, gyroOff: this.gyroOff };
   }
 

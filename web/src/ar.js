@@ -19,6 +19,13 @@
 // how much newer shows as lag or jiggle. So each frame handed to the tracker is also copied into a
 // texture (frameSink), and it is shown when the tracker's answer for it comes back. The <video>
 // shows only until then, or when there is no tracker.
+//
+// Light: a capture carries the light of the room it was filmed in, usually bright and neutral, so
+// in a dim or warm room it looks pasted in. Like ARKit's light estimation, the tracker measures the
+// camera frame's brightness and colour cast, and the colour of the floor under the scene; the
+// scene is drawn darker or brighter, tinted the same way, darkened where it touches the floor and
+// lit a little by the floor's colour near it (viewer.js).
+const LIGHT_REF = 0.42;          // mean brightness (0-1) of a normally exposed camera frame
 
 const D2R = Math.PI / 180;
 // iPhone main (wide) camera: 26 mm equivalent focal length -> about 67 degrees across the long
@@ -90,6 +97,8 @@ export class LookAroundAR {
     this.shownSlot = -1;             // camera texture to draw (-1: none yet, the <video> shows)
     this.pendingSlot = -1;           // texture holding the frame the tracker is working on
     this.lastFrame = 0;
+    this.light = null;               // smoothed { frame: [r, g, b], floor: [r, g, b] }, 0-1
+    this.footprint = 0.3;            // metres: radius of the floor the scene covers
     this.reset();
   }
 
@@ -200,11 +209,12 @@ export class LookAroundAR {
     const gyro = this.readings;
     this.readings = [];
     this.busy = true;
+    const box = this.floorBox(w, h, f);
     if (this.frameSink) {                                  // keep this frame to show with its pose
       this.pendingSlot = this.shownSlot === 0 ? 1 : 0;
       this.frameSink(this.pendingSlot);
     }
-    this.worker.postMessage({ type: "frame", rgba: img.data.buffer, w, h, f, time, gyro, height: this.height },
+    this.worker.postMessage({ type: "frame", rgba: img.data.buffer, w, h, f, time, gyro, height: this.height, box },
                             [img.data.buffer]);
   }
 
@@ -215,6 +225,39 @@ export class LookAroundAR {
     if (this.pendingSlot >= 0) this.shownSlot = this.pendingSlot;   // the frame this answer is for
     this.pendingSlot = -1;
     if (m.C) this.track = m;
+    if (m.light) {
+      const k = this.light ? 0.08 : 1;                      // about 0.4 s to follow a change of light
+      const mix = (a, b) => a.map((v, i) => v + k * (b[i] / 255 - v));
+      const zero = [0, 0, 0];
+      this.light = { frame: mix(this.light ? this.light.frame : zero, m.light.frame),
+                     floor: m.light.floor ? mix(this.light && this.light.floor || zero, m.light.floor)
+                                          : this.light && this.light.floor };
+    }
+  }
+
+  // The box of the tracking image where the floor under the scene is, or null.
+  floorBox(w, h, f) {
+    if (!this.placed || !this.track) return null;
+    const C = this.camera(), T = this.position(), P = this.placed;
+    const c = mulv(transpose(C), [P[0] - T[0], P[1] - T[1], P[2] - T[2]]);
+    if (c[2] < 0.2) return null;
+    const u = f * c[0] / c[2] + (w - 1) / 2, v = f * c[1] / c[2] + (h - 1) / 2;
+    const r = Math.max(4, f * 1.4 * this.footprint / c[2]);
+    return [u - r, v - 0.6 * r, u + r, v + 0.6 * r];
+  }
+
+  // How to draw the scene to match the room's light: gain (r, g, b) for its colours, and the floor's
+  // colour cast for the light it bounces near the floor.
+  lighting() {
+    const l = this.light;
+    if (!l) return { gain: [1, 1, 1], floorTint: [1, 1, 1], exposure: 1 };
+    const luma = (c) => Math.max(1e-3, 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]);
+    const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+    const L = luma(l.frame);
+    const exposure = clamp((L / LIGHT_REF) ** 0.75, 0.45, 1.2);
+    const gain = l.frame.map((c) => exposure * clamp(1 + 0.5 * (c / L - 1), 0.8, 1.25));
+    const floorTint = l.floor ? l.floor.map((c) => clamp(c / luma(l.floor), 0.6, 1.5)) : [1, 1, 1];
+    return { gain, floorTint, exposure };
   }
 
   // Tracking state for the hints and the readout: "tracking", "searching" (not enough floor
@@ -249,18 +292,34 @@ export class LookAroundAR {
     return this.track ? this.track.T : [0, 0, 0];
   }
 
-  // Put the scene where the tap at canvas pixel (x, y) meets the floor. Returns false if it doesn't.
-  place(x, y, w, h, f, header) {
+  // Where the ray through canvas pixel (x, y) meets the floor, or null.
+  floorAt(x, y, w, h, f, maxDist = 8) {
     const C = this.camera();
-    if (!C) return false;
-    const T = this.position();
+    if (!C) return null;
     const len = Math.hypot((x - w / 2) / f, (y - h / 2) / f, 1);
-    const P = floorHit(C, [(x - w / 2) / f / len, (y - h / 2) / f / len, 1 / len], this.height, 8, T);
+    return floorHit(C, [(x - w / 2) / f / len, (y - h / 2) / f / len, 1 / len], this.height, maxDist, this.position());
+  }
+
+  // Put the scene on the floor: the first time on the ring (the middle of the screen), wherever the
+  // tap was; afterwards where the tap was. Returns false if that isn't floor.
+  place(x, y, w, h, f, header) {
+    if (!this.placed) { x = w / 2; y = h / 2; }
+    const P = this.floorAt(x, y, w, h, f);
     if (!P) return false;
+    const T = this.position();
     this.placed = P;
     this.S = standOnFloor(P, header.front, 0, T);
     this.turn = 0;
     return true;
+  }
+
+  // Two fingers moved from (x0, y0) to (x1, y1) (canvas pixels): the scene slides along the floor
+  // by as much as the floor under the fingers did.
+  slide(x0, y0, x1, y1, w, h, f) {
+    if (!this.placed) return;
+    const a = this.floorAt(x0, y0, w, h, f, 30), b = this.floorAt(x1, y1, w, h, f, 30);
+    if (!a || !b) return;
+    this.placed = [this.placed[0] + b[0] - a[0], this.placed[1] + b[1] - a[1], this.placed[2]];
   }
 
   // Another scene: it stands where the last one stood, facing the camera.
@@ -290,6 +349,7 @@ export class LookAroundAR {
     const out = { focal: f, world: { rows: W2C, t: mulv(W2C, T).map((v) => -v) }, reticle: null };
     const s = this.scale(stats);
     const footprint = 1.1 * s * stats.radius;          // radius of the floor the scene covers
+    this.footprint = footprint;
     if (!this.placed) {
       out.reticle = floorHit(C, [0, 0, 1], this.height, 8, T);
       out.reticleRadius = Math.max(0.1, Math.min(0.6, footprint));
@@ -304,6 +364,8 @@ export class LookAroundAR {
     out.draw = { r0: rows(0).map((v) => v * s), r1: rows(1).map((v) => v * s), r2: rows(2).map((v) => v * s), t };
     out.sort = { r0: rows(0), r1: rows(1), r2: rows(2), t: t.map((v) => v / s), near: 0.03 / s };
     out.shadow = { center: P, radius: 1.3 * footprint };
+    out.scale = s;
+    out.light = this.lighting();
     return out;
   }
 }
