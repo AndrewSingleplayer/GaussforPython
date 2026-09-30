@@ -2,8 +2,8 @@
 
 HA++ is a small compiled programming language for fast 3D graphics (Gaussian
 splats, AR) and AI. You write your code once. From Windows, macOS or Linux,
-HA++ builds it for Android, iPhone and PC. It does not need Xcode or the
-Android NDK.
+HA++ builds it for Android, iPhone, PC and web browsers. It does not need
+Xcode or the Android NDK.
 
 - **CPU code** becomes native ARM64 / x86-64 machine code through LLVM, the
   same backend as Swift, Rust and C. It runs as fast as C.
@@ -25,7 +25,8 @@ phone runs the same `.so`.*
                                   ┌─► ARM64 .so ─────────► Android (jniLibs/arm64-v8a + Kotlin/Java)
  your .ha file ─► happ (Python) ─►├─► ARM64 .a ──────────► iPhone  (Swift package / XCFramework)
                   type checker    ├─► x86-64 .dll/.so ───► Windows / Linux / Android emulator
-                  LLVM IR         ├─► SPIR-V (embedded) ─► Vulkan GPUs: Android, Windows, Linux
+                  LLVM IR         ├─► WebAssembly .wasm ─► browsers, Safari on iPhone (+ JS loader)
+                                  ├─► SPIR-V (embedded) ─► Vulkan GPUs: Android, Windows, Linux
                                   └─► Metal source ──────► iPhone / Mac GPUs
 ```
 
