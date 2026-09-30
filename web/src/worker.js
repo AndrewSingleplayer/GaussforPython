@@ -12,7 +12,7 @@ self.onmessage = async (ev) => {
     try {
       const r = engine.load(msg.buffer);
       self.postMessage({ type: "loaded", id: msg.id, header: r.header, gpu: r.gpu, decodeMs: r.decodeMs,
-                         engine: engine.kind, why: engine.why || "" }, [r.gpu.buffer]);
+                         stats: r.stats, engine: engine.kind, why: engine.why || "" }, [r.gpu.buffer]);
     } catch (e) {
       self.postMessage({ type: "error", id: msg.id, message: String(e && e.message || e) });
     }

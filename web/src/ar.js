@@ -1,16 +1,24 @@
-// Look-around AR without WebXR (Safari on iPhone has no WebXR).
+// AR without WebXR (Safari on iPhone has no WebXR), with the floor found from gravity.
 //
 // What a web page can use on an iPhone is enough for this:
 //   - the camera image (getUserMedia), shown behind the transparent WebGL canvas;
-//   - the phone's orientation (DeviceOrientation: the fused gyroscope/accelerometer/compass angles),
-//     which turns the virtual camera, so the scene stays put in the room when you turn the phone.
-// This tracks rotation only (3 degrees of freedom). Walking doesn't change your distance to the
-// scene yet; that needs visual tracking of the floor (the next step, see web/README.md).
+//   - the phone's orientation (DeviceOrientation: fused gyroscope, accelerometer and compass),
+//     which gives the camera's rotation and, with it, which way is down.
+// The floor is the horizontal plane `height` metres below the phone. A ring shows where the middle
+// of the screen meets the floor; a tap puts the scene there, standing on the floor at a real size.
+// Rotation is tracked; walking is not yet (floor tracking with the camera image is the next step,
+// see research/04-phones-and-webar.md), so the scene keeps its place while you turn, not while
+// you walk.
+//
+// World frame: the orientation frame (x east, y north, z up), camera at the origin, metres.
+// Scenes are y up (web/pack.py).
 
 const D2R = Math.PI / 180;
 // iPhone main (wide) camera: 26 mm equivalent focal length -> about 67 degrees across the long
 // side of the image. Safari's getUserMedia uses this camera for facingMode "environment".
 const FOV_LONG = 67 * D2R;
+const PHONE_HEIGHT = 1.35;       // metres from the floor to a phone held in front of you
+const SCENE_HEIGHT = 0.7;        // metres: how tall a scene stands when placed (pinch changes it)
 
 function mul(a, b) {               // 3x3, row-major
   const r = new Array(9);
@@ -23,6 +31,7 @@ const mulv = (a, v) => [a[0] * v[0] + a[1] * v[1] + a[2] * v[2], a[3] * v[0] + a
                         a[6] * v[0] + a[7] * v[1] + a[8] * v[2]];
 const transpose = (a) => [a[0], a[3], a[6], a[1], a[4], a[7], a[2], a[5], a[8]];
 const rotZ = (t) => [Math.cos(t), -Math.sin(t), 0, Math.sin(t), Math.cos(t), 0, 0, 0, 1];
+const M_SCENE = [1, 0, 0, 0, 0, -1, 0, 1, 0];     // scene (x, y, z) -> world (x, -z, y): y up -> z up
 
 // Earth-from-device rotation from DeviceOrientation angles (W3C: intrinsic Z-X'-Y'', degrees).
 // Device axes: x to the right of the screen (portrait), y to the top, z out of the screen.
@@ -41,23 +50,22 @@ export function cameraToWorld(R, screenAngle) {
   return mul(Rs, [1, 0, 0, 0, -1, 0, 0, 0, -1]);
 }
 
-// Horizontal direction the camera looks in (unit 2D vector in the world's x-y plane).
-export function heading(C) {
-  const fh = [C[2], C[5]];                             // camera forward = third column of C
-  const len = Math.hypot(fh[0], fh[1]);
-  return len > 1e-3 ? [fh[0] / len, fh[1] / len] : [0, 1];
+// Where a camera ray meets the floor (z = -height), or null when it points too high or too far.
+export function floorHit(C, dirCam, height, maxDist = 8) {
+  const d = mulv(C, dirCam);
+  if (d[2] > -0.05) return null;
+  const t = height / -d[2];
+  if (t * Math.hypot(d[0], d[1]) > maxDist) return null;
+  return [t * d[0], t * d[1], -height];
 }
 
-// Where the scene goes: `dist` along the horizontal direction `fh`, a bit below eye level, turned
-// so its front faces the viewer. Returns world-from-scene as p_world = T + S p_scene. The world is
-// the orientation frame (z up); scenes are y up.
-export function placement(fh, front, dist, turn = 0) {
-  const T = [fh[0] * dist, fh[1] * dist, -0.15 * dist];     // about 8 degrees below eye level
-  const M = [1, 0, 0, 0, 0, -1, 0, 1, 0];              // scene (x, y, z) -> world (x, -z, y)
-  const fw = mulv(M, front);
-  const want = Math.atan2(-fh[1], -fh[0]);             // from the scene toward the camera
+// Rotation of a scene standing at floor point P: upright, its front facing the camera (at the
+// origin), plus a user turn about the vertical.
+export function standOnFloor(P, front, turn) {
+  const fw = mulv(M_SCENE, front);
+  const want = Math.atan2(-P[1], -P[0]);              // from the scene toward the camera
   const have = Math.atan2(fw[1], fw[0]);
-  return { T, S: mul(rotZ(want - have + turn), M) };
+  return mul(rotZ(want - have + turn), M_SCENE);
 }
 
 export class LookAroundAR {
@@ -65,9 +73,15 @@ export class LookAroundAR {
     this.video = video;
     this.on = false;
     this.R = null;
-    this.fh = null;                                    // where the scene was placed (set on the first view)
-    this.turn = 0;                                     // extra turn of the scene (drag)
-    this.zoom = 1;                                     // distance factor (pinch)
+    this.height = PHONE_HEIGHT;
+    this.reset();
+  }
+
+  reset() {
+    this.placed = null;              // floor point where the scene stands
+    this.S = null;                   // its rotation (fixed when placed)
+    this.turn = 0;                   // extra turn about the vertical (drag)
+    this.zoom = 1;                   // size factor (pinch)
   }
 
   // Why AR can't start here, or null.
@@ -95,9 +109,7 @@ export class LookAroundAR {
     };
     window.addEventListener("deviceorientation", this.onOrient);
     this.on = true;
-    this.fh = null;
-    this.turn = 0;
-    this.zoom = 1;
+    this.reset();
   }
 
   stop() {
@@ -108,7 +120,7 @@ export class LookAroundAR {
     this.video.hidden = true;
     this.on = false;
     this.R = null;
-    this.fh = null;
+    this.reset();
   }
 
   screenAngle() {
@@ -124,20 +136,63 @@ export class LookAroundAR {
     return fVideo * k * (canvasW / cssW);
   }
 
-  // View for scene coordinates: rows of scene -> camera, translation, focal length. Null until the
-  // first orientation reading arrives.
-  view(header, canvasW, cssW, cssH) {
-    if (!this.R) return null;
-    const C = cameraToWorld(this.R, this.screenAngle());
-    const f = this.focal(canvasW, cssW, cssH);
-    if (!this.fh) {                                    // first reading: the scene goes where the phone looks, once
-      this.fh = heading(C);
-      const tanX = 0.5 * canvasW / f;                  // fit the scene across the screen, as the viewer does
-      this.base = 1.3 * header.distance * Math.max(1, Math.tan(25 * D2R) / tanX);
+  camera() {
+    return this.R ? cameraToWorld(this.R, this.screenAngle()) : null;
+  }
+
+  // Put the scene where the tap at canvas pixel (x, y) meets the floor. Returns false if it doesn't.
+  place(x, y, w, h, f, header) {
+    const C = this.camera();
+    if (!C) return false;
+    const len = Math.hypot((x - w / 2) / f, (y - h / 2) / f, 1);
+    const P = floorHit(C, [(x - w / 2) / f / len, (y - h / 2) / f / len, 1 / len], this.height);
+    if (!P) return false;
+    this.placed = P;
+    this.S = standOnFloor(P, header.front, 0);
+    this.turn = 0;
+    return true;
+  }
+
+  // Another scene: it stands where the last one stood, facing the camera.
+  sceneChanged(header) {
+    if (this.placed) {
+      this.S = standOnFloor(this.placed, header.front, 0);
+      this.turn = 0;
     }
-    const place = placement(this.fh, header.front, this.base * this.zoom, this.turn);
+  }
+
+  // Scale from scene units to metres.
+  scale(stats) {
+    return this.zoom * SCENE_HEIGHT / Math.max(1e-6, stats.top - stats.ground);
+  }
+
+  // What to draw this frame:
+  //   focal; world: world -> camera (for the floor ring and the shadow); reticle, reticleRadius: the
+  //   floor point in the middle of the screen before placing, and the size of the floor the scene
+  //   will cover; draw: scene -> camera in metres; sort: the same in scene units (with near);
+  //   shadow: {center, radius} on the floor.
+  view(stats, canvasW, cssW, cssH) {
+    const C = this.camera();
+    if (!C) return null;
+    const f = this.focal(canvasW, cssW, cssH);
     const W2C = transpose(C);
-    const rot = mul(W2C, place.S);
-    return { r0: rot.slice(0, 3), r1: rot.slice(3, 6), r2: rot.slice(6, 9), t: mulv(W2C, place.T), focal: f };
+    const out = { focal: f, world: { rows: W2C, t: [0, 0, 0] }, reticle: null };
+    const s = this.scale(stats);
+    const footprint = 1.1 * s * stats.radius;          // radius of the floor the scene covers
+    if (!this.placed) {
+      out.reticle = floorHit(C, [0, 0, 1], this.height);
+      out.reticleRadius = Math.max(0.1, Math.min(0.6, footprint));
+      return out;
+    }
+    const S = mul(rotZ(this.turn), this.S);
+    const rot = mul(W2C, S);                            // scene -> camera rotation
+    const base = mulv(S, [stats.cx, stats.ground, stats.cz]);   // the middle of the scene's base, turned
+    const P = this.placed;
+    const t = mulv(W2C, [P[0] - s * base[0], P[1] - s * base[1], P[2] - s * base[2]]);
+    const rows = (k) => rot.slice(3 * k, 3 * k + 3);
+    out.draw = { r0: rows(0).map((v) => v * s), r1: rows(1).map((v) => v * s), r2: rows(2).map((v) => v * s), t };
+    out.sort = { r0: rows(0), r1: rows(1), r2: rows(2), t: t.map((v) => v / s), near: 0.03 / s };
+    out.shadow = { center: P, radius: 1.3 * footprint };
+    return out;
   }
 }

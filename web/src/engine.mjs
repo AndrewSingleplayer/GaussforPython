@@ -21,6 +21,24 @@ export function parseHeader(buf) {
   };
 }
 
+// Where the scene's base is, where its middle is and how tall it is (y is up), ignoring the
+// outermost 2% of splats: used to stand a scene on the floor in AR at a real size.
+export function sceneStats(pos, n) {
+  const step = Math.max(1, Math.floor(n / 20000));
+  const xs = [], ys = [], zs = [];
+  for (let i = 0; i < n; i += step) {
+    xs.push(pos[3 * i]);
+    ys.push(pos[3 * i + 1]);
+    zs.push(pos[3 * i + 2]);
+  }
+  const at = (a, q) => a[Math.min(a.length - 1, Math.floor(q * (a.length - 1)))];
+  const sorted = (a) => a.slice().sort((u, v) => u - v);
+  const cx = at(sorted(xs), 0.5), cz = at(sorted(zs), 0.5);
+  const rs = sorted(xs.map((x, i) => Math.hypot(x - cx, zs[i] - cz)));
+  const ysSorted = sorted(ys);
+  return { ground: at(ysSorted, 0.02), top: at(ysSorted, 0.98), cx, cz, radius: at(rs, 0.9) };
+}
+
 // camera: { rot: [r0 x3, r1 x3, r2 x3] (world -> camera rows: right, down, forward), t: [x, y, z],
 //           tanX, tanY, near }
 function cameraFloats(cam) {
@@ -60,7 +78,8 @@ class WasmEngine {
     const t0 = performance.now();
     this.ex.decode_splats(at.src, n, at.box, at.gpu, at.pos, at.radius);
     const ms = performance.now() - t0;
-    return { header: h, gpu: new Uint32Array(this.memory.buffer, at.gpu, 8 * n).slice(), decodeMs: ms };
+    const stats = sceneStats(new Float32Array(this.memory.buffer, at.pos, 3 * n), n);
+    return { header: h, gpu: new Uint32Array(this.memory.buffer, at.gpu, 8 * n).slice(), decodeMs: ms, stats };
   }
 
   sort(cam, budget) {
@@ -129,7 +148,7 @@ class JsEngine {
     this.keys = new Uint32Array(n);
     this.ids = new Uint32Array(n);
     this.counts = new Uint32Array(65536);
-    return { header: h, gpu, decodeMs: ms };
+    return { header: h, gpu, decodeMs: ms, stats: sceneStats(pos, n) };
   }
 
   sort(cam, budget) {

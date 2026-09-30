@@ -25,6 +25,7 @@ by the page's own code:
 | Level | What it tracks | How | Effort | Here |
 |---|---|---|---|---|
 | **Look-around (3DoF)** | rotation | fused `DeviceOrientation` angles turn the virtual camera; the camera image fills the background | small | **done**: `web/src/ar.js` |
+| **Floor from gravity** | where the floor is, at what scale | the floor is the horizontal plane (gravity from the motion sensors) a standing person's phone height below the camera; a ray from the screen meets it | small | **done**: ring on the floor, tap to place, contact shadow |
 | Image target | position and rotation relative to a printed picture | feature matching + homography + pose (PnP) per frame | medium | not planned |
 | **Floor tracking (6DoF)** | position and rotation relative to the floor | track corner features on the floor (optical flow), estimate the floor plane's motion between frames, fuse with the gyroscope; scale from the phone's height above the floor | large | **next**: in HA++, compiled to WebAssembly |
 | Full SLAM | a map of the room | what ARKit does | very large | not planned |
@@ -34,7 +35,8 @@ The 3DoF mode uses these conventions:
 - the camera looks along the device's −z;
 - a field of view matching the iPhone main camera: 26 mm equivalent, about 67° across the long
   side of the image;
-- the scene placed once, where the phone looks when AR starts.
+- the floor 1.35 m below the phone (a phone held in front of a standing adult); the scene is
+  placed where a tap's ray meets the floor, standing up, facing the camera, 0.7 m tall.
 
 `web/src/ar.js` has this math. It was checked in Node (turning left moves the scene right,
 tilting down moves it up, landscape stays consistent), and in headless Chromium with a fake

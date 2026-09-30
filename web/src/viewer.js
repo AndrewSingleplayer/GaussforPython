@@ -73,6 +73,41 @@ void main() {
   frag = vec4(v_color.rgb * alpha, alpha);         // premultiplied, drawn back to front
 }`;
 
+// A disc lying on the floor (world z up): the placement ring and the contact shadow under the scene.
+// Clip coordinates keep w = depth, so the GPU clips the parts behind the camera.
+const FLOOR_VS = `#version 300 es
+precision highp float;
+uniform vec3 u_r0, u_r1, u_r2, u_t;   // world -> camera
+uniform vec3 u_center;
+uniform float u_radius;
+uniform vec2 u_focal, u_size;
+layout(location = 0) in vec2 a_corner;
+out vec2 v_uv;
+void main() {
+  vec3 w = u_center + vec3(a_corner * u_radius, 0.0);
+  vec3 c = vec3(dot(u_r0, w), dot(u_r1, w), dot(u_r2, w)) + u_t;
+  gl_Position = vec4(2.0 * u_focal.x * c.x / u_size.x, -2.0 * u_focal.y * c.y / u_size.y, 0.0, c.z);
+  v_uv = a_corner;
+}`;
+
+const FLOOR_FS = `#version 300 es
+precision mediump float;
+uniform int u_kind;                   // 0: placement ring, 1: contact shadow
+in vec2 v_uv;
+out vec4 frag;
+void main() {
+  float r = length(v_uv);
+  if (u_kind == 0) {
+    float ring = smoothstep(0.72, 0.78, r) * (1.0 - smoothstep(0.94, 1.0, r));
+    float dot0 = 1.0 - smoothstep(0.10, 0.14, r);
+    float a = max(ring, dot0) * 0.9;
+    frag = vec4(vec3(a), a);
+  } else {
+    float a = 0.5 * exp(-4.5 * r * r) * (1.0 - smoothstep(0.85, 1.0, r));   // darkest at the base
+    frag = vec4(0.0, 0.0, 0.0, a);
+  }
+}`;
+
 // ------------------------------------------------------------------ WebGL setup
 const gl = canvas.getContext("webgl2", { antialias: false, alpha: true, premultipliedAlpha: true,
                                          powerPreference: "high-performance", depth: false, stencil: false });
@@ -100,6 +135,39 @@ const U = {};
 for (const name of ["u_data", "u_r0", "u_r1", "u_r2", "u_t", "u_focal", "u_size", "u_lim", "u_near"]) {
   U[name] = gl.getUniformLocation(prog, name);
 }
+const floorProg = gl.createProgram();
+gl.attachShader(floorProg, shader(gl.VERTEX_SHADER, FLOOR_VS));
+gl.attachShader(floorProg, shader(gl.FRAGMENT_SHADER, FLOOR_FS));
+gl.linkProgram(floorProg);
+if (!gl.getProgramParameter(floorProg, gl.LINK_STATUS)) fail("Shader link error: " + gl.getProgramInfoLog(floorProg));
+const FU = {};
+for (const name of ["u_r0", "u_r1", "u_r2", "u_t", "u_center", "u_radius", "u_focal", "u_size", "u_kind"]) {
+  FU[name] = gl.getUniformLocation(floorProg, name);
+}
+const floorVao = gl.createVertexArray();
+gl.bindVertexArray(floorVao);
+const floorBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, floorBuf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+function drawFloor(world, center, radius, kind, fx, fy, w, h) {
+  gl.useProgram(floorProg);
+  gl.uniform3fv(FU.u_r0, world.rows.slice(0, 3));
+  gl.uniform3fv(FU.u_r1, world.rows.slice(3, 6));
+  gl.uniform3fv(FU.u_r2, world.rows.slice(6, 9));
+  gl.uniform3fv(FU.u_t, world.t);
+  gl.uniform3fv(FU.u_center, center);
+  gl.uniform1f(FU.u_radius, radius);
+  gl.uniform2f(FU.u_focal, fx, fy);
+  gl.uniform2f(FU.u_size, w, h);
+  gl.uniform1i(FU.u_kind, kind);
+  gl.bindVertexArray(floorVao);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  gl.useProgram(prog);
+}
+
 const vao = gl.createVertexArray();
 gl.bindVertexArray(vao);
 const cornerBuf = gl.createBuffer();
@@ -150,7 +218,8 @@ worker.onmessage = (ev) => {
     data.set(m.gpu);
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32UI, 4096, rows, 0, gl.RGBA_INTEGER, gl.UNSIGNED_INT, data);
-    scene = { n, header: m.header, decodeMs: m.decodeMs };
+    scene = { n, header: m.header, decodeMs: m.decodeMs, stats: m.stats };
+    ar.sceneChanged(m.header);
     drawCount = 0;
     sortedFor = null;
     sortInFlight = false;
@@ -248,17 +317,20 @@ function viewRows() {
 
 // ------------------------------------------------------------------ input: drag to orbit, pinch to zoom, two fingers to pan
 const pointers = new Map();
+let tap = null;                         // a possible tap: one finger that barely moves
 canvas.addEventListener("pointerdown", (e) => {
   canvas.setPointerCapture(e.pointerId);
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  tap = pointers.size === 1 ? { x: e.clientX, y: e.clientY, t: performance.now(), moved: 0 } : null;
   lastInput = performance.now();
 });
 canvas.addEventListener("pointermove", (e) => {
   const p = pointers.get(e.pointerId);
   if (!p) return;
   const dx = e.clientX - p.x, dy = e.clientY - p.y;
+  if (tap) tap.moved += Math.hypot(dx, dy);
   if (ar.on && pointers.size === 1) {
-    ar.turn += dx * 0.01;                   // AR: drag turns the scene where it stands
+    if (!tap || tap.moved > 12) ar.turn += dx * 0.01;   // AR: drag turns the scene where it stands
   } else if (pointers.size === 1) {
     cam.yaw -= dx * 0.006;
     cam.pitch = Math.max(-1.45, Math.min(1.45, cam.pitch + dy * 0.006));
@@ -267,8 +339,8 @@ canvas.addEventListener("pointermove", (e) => {
     const other = a === p ? b : a;
     const before = Math.hypot(p.x - other.x, p.y - other.y);
     const after = Math.hypot(e.clientX - other.x, e.clientY - other.y);
-    if (ar.on) {                            // AR: pinch brings the scene nearer or moves it away
-      if (before > 0 && after > 0) ar.zoom = Math.max(0.2, Math.min(5, ar.zoom * before / after));
+    if (ar.on) {                            // AR: pinch makes the scene bigger or smaller
+      if (before > 0 && after > 0) ar.zoom = Math.max(0.2, Math.min(5, ar.zoom * after / before));
       p.x = e.clientX;
       p.y = e.clientY;
       return;
@@ -283,7 +355,19 @@ canvas.addEventListener("pointermove", (e) => {
   lastInput = performance.now();
   dirty = true;
 });
-const up = (e) => { pointers.delete(e.pointerId); lastInput = performance.now(); };
+const up = (e) => {
+  pointers.delete(e.pointerId);
+  lastInput = performance.now();
+  if (ar.on && scene && tap && tap.moved <= 12 && performance.now() - tap.t < 500 && e.type === "pointerup") {
+    const r = canvas.getBoundingClientRect();
+    const k = canvas.width / r.width;
+    const f = ar.focal(canvas.width, canvas.clientWidth, canvas.clientHeight);
+    const x = (e.clientX - r.left) * k, y = (e.clientY - r.top) * k;
+    if (!ar.place(x, y, canvas.width, canvas.height, f, scene.header)) arHint("Tap on the floor (point the phone down a bit).");
+    dirty = true;
+  }
+  tap = null;
+};
 canvas.addEventListener("pointerup", up);
 canvas.addEventListener("pointercancel", up);
 canvas.addEventListener("wheel", (e) => {
@@ -311,15 +395,35 @@ function setMode(mode) {
   dirty = true;
 }
 
+// The display or the browser may cap the frame rate (Low Power Mode caps Safari at 30 fps). Lowering
+// the quality can't beat a cap, so each step down is a trial: if the fps doesn't rise within two
+// seconds, the step is undone and the fps it stays at is taken as the cap.
+let trial = null;
+let cap = 0;
 function adapt(fps) {
   if (quality.mode !== "auto" || !scene) return;
-  if (fps < 42) {                          // too slow: fewer pixels first, then fewer splats
+  const now = performance.now();
+  if (trial && now - trial.time > 2000) {
+    if (fps < trial.fps * 1.1) {
+      quality.scale = trial.scale;
+      quality.budget = trial.budget;
+      cap = Math.max(cap, trial.fps);
+      sortedFor = null;
+      dirty = true;
+    }
+    trial = null;
+    return;
+  }
+  if (trial) return;
+  const low = cap ? 0.85 * cap : 42, high = cap ? 0.95 * cap : 57;
+  if (fps < low) {                          // too slow: fewer pixels first, then fewer splats
+    trial = { fps, scale: quality.scale, budget: quality.budget, time: now };
     if (quality.scale > Math.max(LIMITS.minScale, 0.75 * Math.min(dpr, 1.5))) quality.scale = Math.max(LIMITS.minScale, quality.scale - 0.15);
     else if (quality.budget > LIMITS.minBudget) quality.budget = Math.max(LIMITS.minBudget, quality.budget * 0.8);
     else quality.scale = Math.max(LIMITS.minScale, quality.scale - 0.1);
     sortedFor = null;
     dirty = true;
-  } else if (fps > 57) {                   // headroom: all splats first, then sharper
+  } else if (fps > high) {                 // headroom: all splats first, then sharper
     if (quality.budget < 1) { quality.budget = Math.min(1, quality.budget * 1.15); sortedFor = null; }
     else if (quality.scale < LIMITS.maxScale) quality.scale = Math.min(LIMITS.maxScale, quality.scale + 0.1);
     dirty = true;
@@ -368,20 +472,30 @@ function frame(now) {
   if (ar.on) gl.clearColor(0, 0, 0, 0);     // transparent: the camera image shows through
   else gl.clearColor(bg[0], bg[1], bg[2], 1);
   gl.clear(gl.COLOR_BUFFER_BIT);
-  const arView = ar.on && scene ? ar.view(scene.header, w, canvas.clientWidth, canvas.clientHeight) : null;
-  if (scene && (!ar.on || arView)) {
-    const v = arView || viewRows();
+  const arView = ar.on && scene ? ar.view(scene.stats, w, canvas.clientWidth, canvas.clientHeight) : null;
+  if (arView) {
+    const f = arView.focal;
+    if (arView.reticle) drawFloor(arView.world, arView.reticle, arView.reticleRadius, 0, f, f, w, h);
+    if (arView.shadow) drawFloor(arView.world, arView.shadow.center, arView.shadow.radius, 1, f, f, w, h);
+    arHint(arView.draw ? "Drag to turn it · pinch to resize · tap the floor to move it"
+                       : arView.reticle ? "Tap to put it on the floor" : "Point the phone at the floor");
+  } else if (ar.on) {
+    arHint(scene ? "Waiting for the motion sensors…" : "Loading the scene…");
+  }
+  if (scene && (!ar.on || (arView && arView.draw))) {
+    const v = arView ? arView.draw : viewRows();
+    const vs = arView ? arView.sort : v;
     const fy = arView ? arView.focal : 0.5 * h / Math.tan(cam.fovy / 2);
     const fx = fy;
     const tanX = 0.5 * w / fx, tanY = 0.5 * h / fy;
-    const near = arView ? 0.01 * scene.header.distance : cam.dist * 0.01;
+    const near = arView ? arView.sort.near : cam.dist * 0.01;
     const budget = Math.max(1, Math.round(scene.n * quality.budget));
-    const key = [...v.r0, ...v.r1, ...v.r2, ...v.t, tanX, tanY, budget].map((x) => x.toFixed(4)).join(",");
+    const key = [...vs.r0, ...vs.r1, ...vs.r2, ...vs.t, tanX, tanY, budget].map((x) => x.toFixed(4)).join(",");
     if (!sortInFlight && key !== sortedFor) {
       sortInFlight = true;
       sortedFor = key;
       worker.postMessage({ type: "sort", id: loadId, budget,
-                           camera: { rot: [...v.r0, ...v.r1, ...v.r2], t: v.t, tanX, tanY, near } });
+                           camera: { rot: [...vs.r0, ...vs.r1, ...vs.r2], t: vs.t, tanX, tanY, near } });
     }
     if (drawCount) {
       gl.uniform3fv(U.u_r0, v.r0);
@@ -391,7 +505,7 @@ function frame(now) {
       gl.uniform2f(U.u_focal, fx, fy);
       gl.uniform2f(U.u_size, w, h);
       gl.uniform2f(U.u_lim, 1.3 * tanX, 1.3 * tanY);
-      gl.uniform1f(U.u_near, near);
+      gl.uniform1f(U.u_near, arView ? 0.03 : near);
       gl.bindVertexArray(vao);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, drawCount);
     }
@@ -428,6 +542,12 @@ function updateHud(now, w, h) {
 }
 
 // ------------------------------------------------------------------ AR
+function arHint(text) {
+  const el = $("ar-hint");
+  if (el.textContent !== text) el.textContent = text;
+  el.hidden = !text;
+}
+
 function arNote(text, link) {
   $("ar-where").textContent = text;
   const a = $("ar-link");
@@ -439,6 +559,7 @@ function arNote(text, link) {
 async function toggleAR() {
   if (ar.on) {
     ar.stop();
+    arHint("");
     document.body.classList.remove("ar");
     $("ar").textContent = "AR";
     $("ar").setAttribute("aria-pressed", "false");

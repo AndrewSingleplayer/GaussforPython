@@ -73,6 +73,9 @@
           background: var(--panel); border-radius: 8px; backdrop-filter: blur(10px);
           -webkit-backdrop-filter: blur(10px); }
   .meta span { color: var(--ink); }
+  .hint { position: absolute; left: 50%; bottom: 130px; transform: translateX(-50%); max-width: 90%;
+          padding: 8px 14px; border-radius: 999px; background: rgba(0, 0, 0, 0.55); color: #fff;
+          font-weight: 500; text-align: center; pointer-events: none; }
   .note { position: absolute; left: 16px; right: 16px; bottom: 150px; margin: 0 auto; max-width: 440px;
           padding: 12px 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
           backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
@@ -103,8 +106,9 @@
     </dl>
   </header>
   <div id="status" class="status" hidden></div>
+  <div id="ar-hint" class="hint" hidden></div>
   <div id="ar-note" class="note" hidden>
-    <p>AR puts the scene into your camera image. Turn the phone and the scene stays where it is.</p>
+    <p>AR stands the scene on your floor, in the camera image. Turn the phone and it stays where it is.</p>
     <p id="ar-where"></p>
     <p><a id="ar-link" href="#" target="_blank" rel="noopener" hidden></a></p>
     <button id="ar-close">Close</button>
