@@ -223,7 +223,7 @@ class Walk:
 def simulate(seconds=8.0, arc=150.0, latency=0.05, drift_deg_s=0.4, gyro_noise_deg=0.05,
              assumed_height=1.35, true_height=1.35, contrast=1.0, seed=3, keep_frames=False,
              true_fov=67.0, exposure_ms=0.0, boxes=False, turns=0.0, floor="terrazzo", readout_ms=0.0,
-             crouch=0.0, noise=2.0):
+             crouch=0.0, noise=2.0, blackout=None, options=None):
     rng = np.random.default_rng(seed)
     tex, texel = floor_texture(seed=seed, contrast=contrast, kind=floor)
     levels = texture_levels(tex)
@@ -267,6 +267,8 @@ def simulate(seconds=8.0, arc=150.0, latency=0.05, drift_deg_s=0.4, gyro_noise_d
             frames[k] = np.clip(np.round(img + rng.normal(0, noise, img.shape)), 0, 255).astype(np.uint8)
         else:
             frames[k] = render(levels, texel, C, T, -true_height, gain, noise, rng, 2, focal, box_list)
+        if blackout and blackout[0] <= t < blackout[1]:        # the camera covered: dark noise
+            frames[k] = np.clip(np.round(8 + rng.normal(0, 3, (H, W))), 0, 255).astype(np.uint8)
         truth.append((C, T))
         arrive = t + latency
         new = []
@@ -280,12 +282,17 @@ def simulate(seconds=8.0, arc=150.0, latency=0.05, drift_deg_s=0.4, gyro_noise_d
         fpath, mpath, opath = (os.path.join(tmp, x) for x in ("frames.bin", "meta.json", "out.json"))
         frames.tofile(fpath)
         with open(mpath, "w") as fh:
-            json.dump({"w": W, "h": H, "f": F, "n": n, "height": assumed_height, "gyro": gyro, "times": times}, fh)
+            json.dump({"w": W, "h": H, "f": F, "n": n, "height": assumed_height, "gyro": gyro, "times": times,
+                       "options": options or {}}, fh)
         subprocess.run(["node", os.path.join(HERE, "track_run.mjs"), fpath, mpath, wasm, opath], check=True)
         with open(opath) as fh:
             out = json.load(fh)
 
     res = evaluate(truth, out, assumed_height, true_height)
+    if blackout:                  # how far off the spot is once the camera sees again
+        after = [e for k, e in enumerate(res["anchor_errors"]) if k / FPS >= blackout[1] + 0.5]
+        res["after_blackout_px"] = float(np.nanmedian(after)) if after else float("nan")
+        res["relocs"] = out[-1].get("relocs", 0)
     raw = evaluate(truth, [dict(o, C=o.get("Craw") or o["C"], T=o.get("Traw") or o["T"]) for o in out],
                    assumed_height, true_height)
     res["raw_anchor_px_median"] = raw["anchor_px_median"]
@@ -410,11 +417,14 @@ def main():
     ap.add_argument("--readout-ms", type=float, default=0.0, help="rolling shutter")
     ap.add_argument("--crouch", type=float, default=0.0, help="go this many metres down and up again")
     ap.add_argument("--noise", type=float, default=2.0, help="camera noise, grey levels (RMS)")
+    ap.add_argument("--blackout", type=float, nargs=2, help="cover the camera from .. to (seconds)")
+    ap.add_argument("--no-reloc", action="store_true", help="without the floor memory")
     args = ap.parse_args()
     res = simulate(args.seconds, args.arc, args.latency, true_height=args.true_height,
                    contrast=args.contrast, seed=args.seed, keep_frames=bool(args.gif),
                    true_fov=args.true_fov, exposure_ms=args.exposure_ms, boxes=args.boxes, turns=args.turns,
-                   floor=args.floor, readout_ms=args.readout_ms, crouch=args.crouch, noise=args.noise)
+                   floor=args.floor, readout_ms=args.readout_ms, crouch=args.crouch, noise=args.noise,
+                   blackout=args.blackout, options={"relocalize": not args.no_reloc})
     for k, v in res.items():
         if k not in ("anchor_errors", "frames", "truth", "out"):
             print(f"{k:22s} {v:.3f}" if isinstance(v, float) else f"{k:22s} {v}")

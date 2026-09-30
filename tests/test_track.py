@@ -46,6 +46,16 @@ class FloorTracking(unittest.TestCase):
         res = track_sim.simulate(floor="planks", readout_ms=20, turns=40, boxes=True)
         self.check(res, 3.0, 10.0)
 
+    def test_recovery_after_covering_the_camera(self):
+        # the camera is covered for 2 s while its holder walks on (about 1.6 m round the spot, on
+        # tiles, which repeat every 30 cm): the floor memory must put the scene back on its spot
+        res = track_sim.simulate(floor="tiles", blackout=(2.5, 4.5), seconds=10, arc=200)
+        self.assertEqual(res["relocs"], 1)
+        self.assertLess(res["after_blackout_px"], 3.0, res)
+        off = track_sim.simulate(floor="tiles", blackout=(2.5, 4.5), seconds=10, arc=200,
+                                 options={"relocalize": False})
+        self.assertGreater(off["after_blackout_px"], 50)       # without it, the scene is far off
+
     def test_light_stats(self):
         # the light measurement (web/track.ha) on a frame with a warm left half and a known box
         w, h = 64, 48

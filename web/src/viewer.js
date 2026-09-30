@@ -570,6 +570,8 @@ function frame(now) {
     const st = ar.trackState();
     if (arView.draw) {
       arHint(st === "tracking" ? "Walk around it · drag to turn · two fingers to slide and resize"
+           : st === "found" ? "Found its place again"
+           : st === "recovering" ? "Finding its place… show the floor you saw before"
            : st === "rotation" ? "Drag to turn it · pinch to resize · tap the floor to move it"
            : "Lost the floor: point the phone at it and move slowly");
     } else {

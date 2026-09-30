@@ -224,7 +224,10 @@ export class LookAroundAR {
     if (m.type !== "pose" || !this.on) return;
     if (this.pendingSlot >= 0) this.shownSlot = this.pendingSlot;   // the frame this answer is for
     this.pendingSlot = -1;
-    if (m.C) this.track = m;
+    if (m.C) {
+      if (this.track && m.relocs > (this.track.relocs || 0)) this.foundAt = performance.now();
+      this.track = m;
+    }
     if (m.light) {
       const k = this.light ? 0.08 : 1;                      // about 0.4 s to follow a change of light
       const mix = (a, b) => a.map((v, i) => v + k * (b[i] / 255 - v));
@@ -261,10 +264,13 @@ export class LookAroundAR {
   }
 
   // Tracking state for the hints and the readout: "tracking", "searching" (not enough floor
-  // texture yet), "lost", "rotation" (no tracker: rotation only).
+  // texture yet), "lost", "recovering" (tracking again, but not yet sure where: looking for the
+  // place in the floor memory), "found" (just found it again), "rotation" (no tracker).
   trackState() {
     if (this.trackError) return "rotation";
     if (!this.track) return "searching";
+    if (this.foundAt && performance.now() - this.foundAt < 1500) return "found";
+    if (this.track.verified === false) return "recovering";
     return this.track.state === "started" ? "tracking" : this.track.state;
   }
 

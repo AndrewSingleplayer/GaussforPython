@@ -24,6 +24,14 @@
 // The floor height sets the scale, and because every point lies on the floor, the depth of a new
 // point is known at once: no second view is needed to start.
 //
+// Floor memory: while tracking works, what the camera sees of the floor is added to a top-down
+// picture of it (2 cm cells, track.ha). When tracking is lost, it starts again at once from where
+// it was (the rotation from the gyroscope), and meanwhile the floor it sees now, seen from above,
+// is searched for in the picture: first in 8 cm cells as far as one could have walked, then the
+// best few places again in 2 cm cells (repeating floors like tiles look alike in 8 cm cells; the
+// fine grain of each tile tells them apart). A clear winner gives how far the phone really moved,
+// and everything (the phone, the points, the scene placed on the floor) is put back in its place.
+//
 // What is drawn: the page draws this very camera frame and the scene with this frame's pose, so
 // the two always match, with no timing to guess (ar.js). The pose is not smoothed: it is the one
 // that puts this frame's floor points where they are seen. Measured on simulated walks, any
@@ -50,6 +58,16 @@ const SHIFT_RANGE = 7;    // pixels searched around the prediction at that level
 const LAG_MAX = 200;      // ms: the camera delays searched
 const LAG_STEP = 5;
 const HISTORY_MS = 2500;  // gyroscope readings and tracked frames kept for measuring the delay
+const MAP_CELL = 0.02;    // metres per cell of the floor picture
+const MAP_HALF = 6;       // metres it reaches from where tracking started, each way
+const MAP_DIST = 3;       // metres: floor further away is too blurry to remember
+const MAP_EVERY = 3;      // tracked frames between additions to the picture
+const RELOC_DOWN = 4;     // the first search is in cells this many times bigger (8 cm)
+const RELOC_MIN = 0.35;   // correlation a match needs
+const RELOC_CLEAR = 0.08; // and by how much it must beat the other candidates, in 2 cm cells
+const RELOC_TRIES = 5;    // candidates from the 8 cm search looked at in 2 cm cells
+const RELOC_GIVE_UP = 10000;  // ms: then the old picture is dropped and a new one started
+const PATCH_MAX = 160;    // cells across the patch compared with the picture
 
 const mul = (a, b) => {
   const r = new Array(9);
@@ -94,6 +112,19 @@ export class FloorTracker {
     this.px = new Float32Array(2 * MAX_POINTS);       // each point's pixel in the last frame
     this.wx = new Float64Array(3 * MAX_POINTS);       // and its place on the floor
     this.bad = new Uint8Array(MAX_POINTS);            // frames in a row it didn't fit
+    // the floor picture lives at the start of the free memory; the per-image buffers come after it
+    this.mw = this.mh = Math.round(2 * MAP_HALF / MAP_CELL);
+    const cw = this.mw / RELOC_DOWN, cells = this.mw * this.mh, ccells = cw * cw;
+    const at = {};
+    let o = this.base;
+    const take = (name, bytes) => { at[name] = o; o += Math.ceil(bytes / 16) * 16; };
+    take("map", cells); take("mapWt", cells); take("cmap", ccells); take("cmapWt", ccells);
+    take("patch", 4 * PATCH_MAX * PATCH_MAX); take("scores", 4 * 65 * 65); take("view", 80); take("match", 16);
+    const have = this.memory.buffer.byteLength;
+    if (o > have) this.memory.grow(Math.ceil((o - have) / 65536));
+    this.mapAt = at;
+    this.base = o;
+    this.opts = { relocalize: true };
     this.reset();
   }
 
@@ -119,6 +150,14 @@ export class FloorTracker {
     this.lag = 60;                    // ms between a frame's time and the moment it shows
     this.lags = [];
     this.lagCheck = 0;
+    this.verified = true;             // the pose agrees with the floor picture (false after a loss)
+    this.lostAt = 0;
+    this.mapLooks = 0;                // additions to the floor picture so far
+    this.mapTick = 0;
+    this.relocTick = 0;
+    this.relocs = 0;                  // times the place was found again
+    this.coarseReady = false;
+    if (this.mapAt) this.clearMap();
 
   }
 
@@ -174,6 +213,114 @@ export class FloorTracker {
       const sorted = this.lags.slice().sort((a, b) => a - b);
       this.lag = sorted[sorted.length >> 1];
     }
+  }
+
+  clearMap() {
+    new Uint8Array(this.memory.buffer, this.mapAt.mapWt, this.mw * this.mh).fill(0);
+    this.mapLooks = 0;
+  }
+
+  // The camera and the floor for track.ha's floor functions, with a grid whose corner is (x0, y0).
+  setView(x0, y0, cell) {
+    const W = transpose(this.C);
+    new Float32Array(this.memory.buffer, this.mapAt.view, 20).set(
+      [...W, ...this.T, this.f, this.cx, this.cy, -this.height, x0, y0, cell, MAP_DIST]);
+  }
+
+  // The part of the floor the camera sees (within MAP_DIST), as a box [x0, y0, x1, y1], or null.
+  visibleFloor() {
+    const { w, h, f, cx, cy, C, T } = this;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, any = false;
+    for (let a = 0; a <= 4; a++) for (let b = 0; b <= 4; b++) {
+      const x = (a * (w - 1) / 4 - cx) / f, y = (b * (h - 1) / 4 - cy) / f;
+      const d = mulv(C, [x, y, 1]);
+      if (d[2] > -0.02) continue;
+      const s = (-this.height - T[2]) / d[2];
+      const r = Math.min(MAP_DIST, s * Math.hypot(d[0], d[1]));
+      const k = r / Math.max(1e-9, Math.hypot(d[0], d[1]));
+      const px = T[0] + k * d[0], py = T[1] + k * d[1];
+      x0 = Math.min(x0, px); y0 = Math.min(y0, py); x1 = Math.max(x1, px); y1 = Math.max(y1, py);
+      any = true;
+    }
+    return any ? [x0, y0, x1, y1] : null;
+  }
+
+  // Adds what the camera sees of the floor now to the floor picture.
+  mapUpdate() {
+    const box = this.visibleFloor();
+    if (!box) return;
+    const g = (v) => Math.max(0, Math.min(this.mw, Math.floor((v + MAP_HALF) / MAP_CELL)));
+    this.setView(-MAP_HALF, -MAP_HALF, MAP_CELL);
+    const a = this.mapAt;
+    this.ex.floor_map_update(this.cur, this.w, this.h, a.view, a.map, a.mapWt, this.mw,
+                             g(box[0]), g(box[1]), Math.min(this.mw, g(box[2]) + 1), Math.min(this.mh, g(box[3]) + 1));
+    this.mapLooks++;
+  }
+
+  // Compares the floor seen now with the picture, in cells of `cell` metres (map: the picture at
+  // that size, mw cells wide), within `range` cells of (di0, dj0). Returns the best shifts, apart
+  // from each other: [{ di, dj, score }], best first.
+  matchFloor(map, mapWt, mw, cell, di0, dj0, range, count = 1) {
+    const box = this.visibleFloor();
+    if (!box) return null;
+    const a = this.mapAt;
+    const mx = (box[0] + box[2]) / 2, my = (box[1] + box[3]) / 2;
+    const pw = Math.min(PATCH_MAX, Math.ceil((box[2] - box[0]) / cell) + 1);
+    const ph = Math.min(PATCH_MAX, Math.ceil((box[3] - box[1]) / cell) + 1);
+    const pi = Math.round((mx + MAP_HALF) / cell - pw / 2), pj = Math.round((my + MAP_HALF) / cell - ph / 2);
+    this.setView(-MAP_HALF + pi * cell, -MAP_HALF + pj * cell, cell);
+    this.ex.floor_patch(this.cur, this.w, this.h, a.view, pw, ph, a.patch);
+    this.ex.floor_map_match(map, mapWt, mw, mw, a.patch, pw, ph, pi + di0, pj + dj0, range, a.scores, a.match);
+    const side = 2 * range + 1, sc = new Float32Array(this.memory.buffer, a.scores, side * side);
+    const peaks = [];
+    for (let j = 0; j < side; j++) for (let i = 0; i < side; i++) {
+      const v = sc[j * side + i];
+      if (v < RELOC_MIN - 0.1) continue;
+      let top = true;                  // a local maximum over its 3 x 3 neighbours
+      for (let b = -1; b <= 1 && top; b++) for (let c = -1; c <= 1; c++) {
+        const y = j + b, x = i + c;
+        if ((b || c) && y >= 0 && x >= 0 && y < side && x < side && sc[y * side + x] > v) { top = false; break; }
+      }
+      if (top) peaks.push({ di: di0 + i - range, dj: dj0 + j - range, score: v });
+    }
+    peaks.sort((p, q) => q.score - p.score);
+    const kept = [];
+    for (const pk of peaks) {
+      if (kept.every((k) => Math.abs(k.di - pk.di) > 3 || Math.abs(k.dj - pk.dj) > 3)) kept.push(pk);
+      if (kept.length >= count) break;
+    }
+    return kept;
+  }
+
+  // After a loss: find the place again in the floor picture. See "Floor memory" at the top.
+  relocalize(time) {
+    const a = this.mapAt, cmw = this.mw / RELOC_DOWN, cell = MAP_CELL * RELOC_DOWN;
+    if (!this.coarseReady) {
+      this.ex.floor_map_down(a.map, a.mapWt, this.mw, this.mh, RELOC_DOWN, a.cmap, a.cmapWt);
+      this.coarseReady = true;
+    }
+    const reach = Math.min(2.5, 0.4 + 1.5 * (time - this.lostAt) / 1000);   // metres one could have walked
+    const coarse = this.matchFloor(a.cmap, a.cmapWt, cmw, cell, 0, 0, Math.min(32, Math.ceil(reach / cell)), RELOC_TRIES);
+    if (!coarse || !coarse.length) return false;
+    const fine = [];
+    for (const c of coarse) {
+      const m = this.matchFloor(a.map, a.mapWt, this.mw, MAP_CELL, RELOC_DOWN * c.di, RELOC_DOWN * c.dj, 5);
+      if (m && m.length) fine.push(m[0]);
+    }
+    fine.sort((p, q) => q.score - p.score);
+    const best = fine[0], other = fine.find((m) => Math.abs(m.di - best.di) > 6 || Math.abs(m.dj - best.dj) > 6);
+    this.lastMatch = best && { ...best, second: other ? other.score : -2 };
+    if (!best || best.score < RELOC_MIN || (other && other.score > best.score - RELOC_CLEAR)) return false;
+    const dx = best.di * MAP_CELL, dy = best.dj * MAP_CELL;
+    this.T = [this.T[0] + dx, this.T[1] + dy, this.T[2]];
+    for (let i = 0; i < this.n; i++) {
+      this.wx[3 * i] += dx;
+      this.wx[3 * i + 1] += dy;
+    }
+    this.verified = true;
+    this.relocs++;
+    this.relocShift = Math.hypot(dx, dy);
+    return true;
   }
 
   alloc(w, h) {
@@ -261,9 +408,21 @@ export class FloorTracker {
       state = this.follow(Cg);
       if (this.n < TARGET) this.addPoints();
     }
+    // the floor picture: add to it while the pose is sure; after a loss, find the place in it again
+    if (state === "lost" && this.verified && this.mapLooks > 10 && this.opts.relocalize) {
+      this.verified = false;
+      this.lostAt = time;
+      this.coarseReady = false;
+    }
+    if (!this.verified && ++this.relocTick % 2 === 0) {
+      if (this.relocalize(time)) state = state === "tracking" ? "found" : state;
+      else if (time - this.lostAt > RELOC_GIVE_UP) { this.clearMap(); this.verified = true; }
+    }
+    if (this.verified && state === "tracking" && ++this.mapTick % MAP_EVERY === 0) this.mapUpdate();
     [this.prev, this.cur] = [this.cur, this.prev];
     [this.hpPrev, this.hpCur] = [this.hpCur, this.hpPrev];
     this.prevTime = time;
+    if (state === "found") state = "tracking";
     if (state === "tracking" || state === "started") {
       this.seen.push({ t: time, C: this.C });
       while (this.seen.length > 2 && this.seen[0].t < time - HISTORY_MS) this.seen.shift();
@@ -273,6 +432,7 @@ export class FloorTracker {
     }
     return { state, ok: state === "tracking" || state === "started", C: this.C.slice(), T: this.T.slice(),
              points: this.n, inliers: this.inliers, ms: performance.now() - t0, lag: this.lag, light,
+             verified: this.verified, relocs: this.relocs, mapLooks: this.mapLooks, match: this.lastMatch,
              followed: this.followed, shiftFix: this.shiftFix, gyroOff: this.gyroOff };
   }
 

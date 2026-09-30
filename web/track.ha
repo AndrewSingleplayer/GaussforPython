@@ -7,6 +7,7 @@
 //   track_points  pyramidal Lucas-Kanade optical flow: where points of one frame went in the next
 //   solve_pose    the camera's rotation and position from points on the floor whose place is known
 //   light_stats   the light in the frame (brightness, colour), to draw the scene to match it
+//   floor_map_*   a top-down picture of the floor, to find the place again after tracking is lost
 //
 // Images are 8-bit grey, row by row, with pixel centres at integer coordinates. A pyramid is its
 // levels one after another: level l is (w >> l) x (h >> l) pixels, each the mean of 2x2 pixels
@@ -147,6 +148,147 @@ export fn corners(img: *u8, w: u32, h: u32, cell: u32, skip: *u8, border: u32,
         }
     }
     return m;
+}
+
+// ------------------------------------------------------------------ floor memory
+// A top-down picture of the floor, built from the camera images while tracking works, so tracking
+// can find its place again after it is lost (the camera covered, a blank patch, a wild swing):
+// the view of the floor now, seen from above, is searched for in the picture. Seen from above, a
+// flat floor looks the same from any direction the camera came from.
+
+// The camera and the floor as a map needs them: world -> camera rotation (rows), the camera's
+// position, the image's focal length and centre, the floor's height, the map's corner and cell
+// size (metres), and how far from the camera floor is used.
+struct MapView { r0: vec3, r1: vec3, r2: vec3, cam: vec3, f: f32, cx: f32, cy: f32, floor_z: f32,
+                 x0: f32, y0: f32, cell: f32, max_dist: f32 }
+
+// Grey level of image img (w x h) at the floor point in the middle of cell (i, j), or -1 if the
+// camera doesn't see it well (behind, outside the image, too far).
+fn floor_sample(img: *u8, w: u32, h: u32, v: *MapView, i: u32, j: u32) -> f32 {
+    let x = vec3(v.x0 + (i as f32 + 0.5) * v.cell, v.y0 + (j as f32 + 0.5) * v.cell, v.floor_z);
+    let d = x - v.cam;
+    if d.x * d.x + d.y * d.y > v.max_dist * v.max_dist { return -1.0; }
+    let c = vec3(dot(v.r0, d), dot(v.r1, d), dot(v.r2, d));
+    if c.z < 0.2 { return -1.0; }
+    let u = v.f * c.x / c.z + v.cx;
+    let q = v.f * c.y / c.z + v.cy;
+    if u < 1.0 || q < 1.0 || u > (w - 3) as f32 || q > (h - 3) as f32 { return -1.0; }
+    let fu = floor(u);
+    let fq = floor(q);
+    let au = u - fu;
+    let aq = q - fq;
+    let p = img + (fq as u32) * w + (fu as u32);
+    return mix(mix(p[0] as f32, p[1] as f32, au), mix(p[w] as f32, p[w + 1] as f32, au), aq);
+}
+
+// Adds what the camera sees to cells (i0, j0) .. (i1, j1) of the map (mw cells wide): each cell is
+// the running mean of up to 15 looks (count in wt).
+export fn floor_map_update(img: *u8, w: u32, h: u32, v: *MapView, map: *u8, wt: *u8, mw: u32,
+                           i0: u32, j0: u32, i1: u32, j1: u32) {
+    for j in j0..j1 {
+        for i in i0..i1 {
+            let s = floor_sample(img, w, h, v, i, j);
+            if s < 0.0 { continue; }
+            let k = j * mw + i;
+            let n = wt[k] as f32;
+            map[k] = ((map[k] as f32 * n + s) / (n + 1.0) + 0.5) as u8;
+            if wt[k] < 15 { wt[k] += 1; }
+        }
+    }
+}
+
+// The floor the camera sees now, as a top-down patch of pw x ph cells in the map's grid (v.x0, v.y0
+// is the patch's corner): grey levels, -1 where not seen.
+export fn floor_patch(img: *u8, w: u32, h: u32, v: *MapView, pw: u32, ph: u32, patch: *f32) {
+    for j in 0..ph {
+        for i in 0..pw {
+            patch[j * pw + i] = floor_sample(img, w, h, v, i, j);
+        }
+    }
+}
+
+// A map at 1/k of the resolution: each cell the mean of the k x k cells it covers that were seen.
+export fn floor_map_down(map: *u8, wt: *u8, mw: u32, mh: u32, k: u32, out: *u8, outwt: *u8) {
+    let ow = mw / k;
+    let oh = mh / k;
+    for j in 0..oh {
+        for i in 0..ow {
+            var s: u32 = 0;
+            var n: u32 = 0;
+            for b in 0..k {
+                for a in 0..k {
+                    let q = (j * k + b) * mw + i * k + a;
+                    if wt[q] != 0 {
+                        s += map[q] as u32;
+                        n += 1;
+                    }
+                }
+            }
+            out[j * ow + i] = select(n > 0, (s / max(n, 1)) as u8, 0 as u8);
+            outwt[j * ow + i] = select(2 * n >= k * k, 1 as u8, 0 as u8);
+        }
+    }
+}
+
+// Where the patch fits the map: normalized cross-correlation of the patch (pw x ph, -1 = unseen)
+// with the map (mw x mh) for the patch placed at map cell (pi + di, pj + dj), every di, dj within
+// range. scores: (2 range + 1)^2 entries, row by row (-2 where too little overlaps). out: best di,
+// best dj, best score.
+export fn floor_map_match(map: *u8, wt: *u8, mw: u32, mh: u32, patch: *f32, pw: u32, ph: u32,
+                          pi: i32, pj: i32, range: i32, scores: *f32, out: *f32) {
+    var seen: u32 = 0;
+    for k in 0..pw * ph {
+        if patch[k] >= 0.0 { seen += 1; }
+    }
+    let side = 2 * range + 1;
+    var best = -2.0;
+    var bi: i32 = 0;
+    var bj: i32 = 0;
+    for dj in 0..side {
+        for di in 0..side {
+            let oi = pi + di - range;
+            let oj = pj + dj - range;
+            var n = 0.0;
+            var sp = 0.0;
+            var sm = 0.0;
+            var spp = 0.0;
+            var smm = 0.0;
+            var spm = 0.0;
+            for j in 0..ph as i32 {
+                let mj = oj + j;
+                if mj < 0 || mj >= mh as i32 { continue; }
+                for i in 0..pw as i32 {
+                    let mi = oi + i;
+                    if mi < 0 || mi >= mw as i32 { continue; }
+                    let p = patch[(j * pw as i32 + i) as u32];
+                    let q = (mj * mw as i32 + mi) as u32;
+                    if p < 0.0 || wt[q] == 0 { continue; }
+                    let m = map[q] as f32;
+                    n += 1.0;
+                    sp += p;
+                    sm += m;
+                    spp += p * p;
+                    smm += m * m;
+                    spm += p * m;
+                }
+            }
+            var score = -2.0;
+            if n > 0.3 * seen as f32 && n > 30.0 {
+                let vp = spp - sp * sp / n;
+                let vm = smm - sm * sm / n;
+                if vp > 1.0 && vm > 1.0 { score = (spm - sp * sm / n) / sqrt(vp * vm); }
+            }
+            scores[(dj * side + di) as u32] = score;
+            if score > best {
+                best = score;
+                bi = di - range;
+                bj = dj - range;
+            }
+        }
+    }
+    out[0] = bi as f32;
+    out[1] = bj as f32;
+    out[2] = best;
 }
 
 // ------------------------------------------------------------------ light

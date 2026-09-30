@@ -126,11 +126,28 @@ The measured delay converges to the true one (20, 50, 100 ms). Each frame takes 
 Node (WebAssembly), 1-5 ms in headless Chromium. In the browser, with a synthetic camera video
 (`--use-file-for-fake-video-capture`), the page's tracker followed a 1.0 m slide to within 1 cm.
 
+**Recovery after tracking is lost (floor memory).** While tracking works, every third frame adds
+what the camera sees of the floor to a top-down picture of it (2 cm cells, 12 x 12 m, the running
+mean of up to 15 looks per cell; `floor_map_update` in `track.ha`). Seen from above, a flat floor
+looks the same whichever way the camera came from, so a view from anywhere can be compared with
+it. When tracking is lost (camera covered, blank floor, a wild swing), it starts again at once,
+from the last position, with the rotation from the gyroscope. Every second frame after that, the
+floor it sees now is resampled from above (`floor_patch`) and searched for in the picture with
+normalized cross-correlation (`floor_map_match`). The search runs first in 8 cm cells, as far as
+one could have walked since the loss (0.4 m + 1.5 m/s, at most 2.5 m). Then the 5 best places are
+compared again in 2 cm cells. On tiles every 30 cm looks alike in 8 cm cells, and only the fine
+grain of each tile tells them apart. A winner that beats the others by 0.08 gives how far the
+phone really moved. The phone's position, the tracked points and the placed scene are then
+shifted back into place. The picture is only added to while the position is sure, so a wrong
+position never gets into it.
+
+Measured: the camera covered for 1 s while its holder walks on. Afterwards the scene is 0.3-1.4 px
+from its spot on terrazzo, tiles, wood and carpet; without the floor memory it is 117 px off (about
+280 points on screen). It also recovers after a 2 s blackout (2.4 px), a blackout during turns
+(0.7 px), and 2 s on tiles while walking 1.6 m (0.6 px). While lost, a search takes up to 23 ms
+every second frame.
+
 What it doesn't do yet:
-- **Relocalization.** After tracking is lost (camera covered, blank floor, very fast motion), the
-  scene keeps its place relative to the last known position. It can end up shifted by however far
-  the phone moved while lost. Recognising the old floor points again (keyframes and descriptors)
-  is the next step.
 - **Real devices.** These numbers are from simulations and a desktop browser. The camera delay,
   the lens and Safari's frame timing on an actual iPhone are measured by the tracker itself as it
   runs; the page shows them.
