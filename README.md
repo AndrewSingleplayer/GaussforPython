@@ -37,8 +37,9 @@ phone runs the same `.so`.*
   Details: [web/README.md](web/README.md).
 - **AR in Safari on iPhone, without WebXR:** the same page, published by
   `.github/workflows/pages.yml` at https://andrewsingleplayer.github.io/GaussforPython/ (once
-  GitHub Pages is on: Settings > Pages > Source: GitHub Actions). The camera image fills the
-  background and the phone's motion sensors keep the scene in place as you turn.
+  GitHub Pages is on: Settings > Pages > Source: GitHub Actions). A ring shows the floor, a tap
+  stands the scene on it, and floor tracking written in HA++ (compiled to WebAssembly) follows
+  the floor in the camera image, so the scene stays on its spot as you walk around it.
 - **Native iPhone app:** `python3 gaussian/build_ios.py` makes `Splats.ipa` without a Mac (see
   [gaussian/README.md](gaussian/README.md)).
 

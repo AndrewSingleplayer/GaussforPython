@@ -11,7 +11,7 @@ const $ = (id) => document.getElementById(id);
 const AR_URL = "https://andrewsingleplayer.github.io/GaussforPython/";
 const canvas = $("view");
 const hud = { fps: $("fps"), frame: $("frame"), sort: $("sort"), drawn: $("drawn"), res: $("res"), engine: $("engine"),
-              status: $("status"), quality: $("quality"), bar: $("bar"), scene: $("scene-name") };
+              status: $("status"), quality: $("quality"), bar: $("bar"), scene: $("scene-name"), track: $("track-info") };
 
 // ------------------------------------------------------------------ shaders
 const VS = `#version 300 es
@@ -205,6 +205,7 @@ let loadId = 0;
 let engineName = "";
 let dirty = true;                // something changed since the last drawn frame
 const ar = new LookAroundAR($("camera"));
+if (new URLSearchParams(location.search).has("debug")) window.ar = ar;     // for tests
 
 worker.onmessage = (ev) => {
   const m = ev.data;
@@ -477,8 +478,16 @@ function frame(now) {
     const f = arView.focal;
     if (arView.reticle) drawFloor(arView.world, arView.reticle, arView.reticleRadius, 0, f, f, w, h);
     if (arView.shadow) drawFloor(arView.world, arView.shadow.center, arView.shadow.radius, 1, f, f, w, h);
-    arHint(arView.draw ? "Drag to turn it · pinch to resize · tap the floor to move it"
-                       : arView.reticle ? "Tap to put it on the floor" : "Point the phone at the floor");
+    const st = ar.trackState();
+    if (arView.draw) {
+      arHint(st === "tracking" ? "Walk around it · drag to turn · pinch to resize"
+           : st === "rotation" ? "Drag to turn it · pinch to resize · tap the floor to move it"
+           : "Lost the floor: point the phone at it and move slowly");
+    } else {
+      arHint(!arView.reticle ? "Point the phone at the floor"
+           : st === "searching" ? "Tap to put it on the floor · finding floor texture…"
+           : "Tap to put it on the floor");
+    }
   } else if (ar.on) {
     arHint(scene ? "Waiting for the motion sensors…" : "Loading the scene…");
   }
@@ -535,6 +544,13 @@ function updateHud(now, w, h) {
     hud.sort.textContent = lastSortMs ? lastSortMs.toFixed(1) : "–";
     hud.drawn.textContent = scene ? `${drawCount.toLocaleString()} / ${scene.n.toLocaleString()}` : "–";
     hud.res.textContent = `${w}×${h}`;
+    const t = ar.on && ar.track;
+    hud.track.hidden = !ar.on;
+    if (ar.on) {
+      hud.track.textContent = ar.trackError ? "floor tracking off (rotation only)"
+        : t ? `floor: ${t.inliers || t.points} points, ${t.ms.toFixed(1)} ms, camera delay ${Math.round(t.lag)} ms`
+        : "floor: starting";
+    }
     hud.quality.textContent = quality.mode === "auto"
       ? `${Math.round(quality.budget * 100)}% of splats · ${quality.scale.toFixed(2)}× resolution`
       : quality.mode === "sharp" ? "all splats · full resolution" : "35% of splats · low resolution";

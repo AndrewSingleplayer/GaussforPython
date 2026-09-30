@@ -1,17 +1,17 @@
-// AR without WebXR (Safari on iPhone has no WebXR), with the floor found from gravity.
+// AR without WebXR (Safari on iPhone has no WebXR): the floor is found and followed by the page.
 //
 // What a web page can use on an iPhone is enough for this:
 //   - the camera image (getUserMedia), shown behind the transparent WebGL canvas;
 //   - the phone's orientation (DeviceOrientation: fused gyroscope, accelerometer and compass),
 //     which gives the camera's rotation and, with it, which way is down.
-// The floor is the horizontal plane `height` metres below the phone. A ring shows where the middle
-// of the screen meets the floor; a tap puts the scene there, standing on the floor at a real size.
-// Rotation is tracked; walking is not yet (floor tracking with the camera image is the next step,
-// see research/04-phones-and-webar.md), so the scene keeps its place while you turn, not while
-// you walk.
+// The floor is the horizontal plane `height` metres below the phone when AR starts. A ring shows
+// where the middle of the screen meets the floor; a tap puts the scene there, standing on the floor
+// at a real size. Floor tracking (tracker.mjs, with the HA++ module track.wasm, in a worker)
+// follows points on the floor in the camera image, so the scene stays on its spot when you walk
+// around it, not just when you turn. Without it (no WebAssembly), rotation is still tracked.
 //
-// World frame: the orientation frame (x east, y north, z up), camera at the origin, metres.
-// Scenes are y up (web/pack.py).
+// World frame: x east, y north, z up, metres; the camera starts at the origin; the floor is
+// z = -height. Scenes are y up (web/pack.py).
 
 const D2R = Math.PI / 180;
 // iPhone main (wide) camera: 26 mm equivalent focal length -> about 67 degrees across the long
@@ -19,6 +19,7 @@ const D2R = Math.PI / 180;
 const FOV_LONG = 67 * D2R;
 const PHONE_HEIGHT = 1.35;       // metres from the floor to a phone held in front of you
 const SCENE_HEIGHT = 0.7;        // metres: how tall a scene stands when placed (pinch changes it)
+const TRACK_LONG = 360;          // long side of the image the floor tracker works on, pixels
 
 function mul(a, b) {               // 3x3, row-major
   const r = new Array(9);
@@ -50,20 +51,21 @@ export function cameraToWorld(R, screenAngle) {
   return mul(Rs, [1, 0, 0, 0, -1, 0, 0, 0, -1]);
 }
 
-// Where a camera ray meets the floor (z = -height), or null when it points too high or too far.
-export function floorHit(C, dirCam, height, maxDist = 8) {
+// Where a ray from the camera at T meets the floor (z = -height), or null when it points too high
+// or too far.
+export function floorHit(C, dirCam, height, maxDist = 8, T = [0, 0, 0]) {
   const d = mulv(C, dirCam);
   if (d[2] > -0.05) return null;
-  const t = height / -d[2];
-  if (t * Math.hypot(d[0], d[1]) > maxDist) return null;
-  return [t * d[0], t * d[1], -height];
+  const t = (-height - T[2]) / d[2];
+  if (t <= 0 || t * Math.hypot(d[0], d[1]) > maxDist) return null;
+  return [T[0] + t * d[0], T[1] + t * d[1], -height];
 }
 
-// Rotation of a scene standing at floor point P: upright, its front facing the camera (at the
-// origin), plus a user turn about the vertical.
-export function standOnFloor(P, front, turn) {
+// Rotation of a scene standing at floor point P: upright, its front facing the camera at T, plus a
+// user turn about the vertical.
+export function standOnFloor(P, front, turn, T = [0, 0, 0]) {
   const fw = mulv(M_SCENE, front);
-  const want = Math.atan2(-P[1], -P[0]);              // from the scene toward the camera
+  const want = Math.atan2(T[1] - P[1], T[0] - P[0]);  // from the scene toward the camera
   const have = Math.atan2(fw[1], fw[0]);
   return mul(rotZ(want - have + turn), M_SCENE);
 }
@@ -74,6 +76,9 @@ export class LookAroundAR {
     this.on = false;
     this.R = null;
     this.height = PHONE_HEIGHT;
+    this.track = null;               // the floor tracker's last answer
+    this.trackError = "";
+    this.readings = [];
     this.reset();
   }
 
@@ -104,25 +109,93 @@ export class LookAroundAR {
     this.video.srcObject = this.stream;
     this.video.hidden = false;
     await this.video.play();
+    this.readings = [];              // motion sensor readings not yet sent to the tracker
     this.onOrient = (e) => {
-      if (e.alpha !== null && e.beta !== null && e.gamma !== null) this.R = deviceRotation(e.alpha, e.beta, e.gamma);
+      if (e.alpha === null || e.beta === null || e.gamma === null) return;
+      this.R = deviceRotation(e.alpha, e.beta, e.gamma);
+      this.readings.push({ t: e.timeStamp || performance.now(), C: cameraToWorld(this.R, this.screenAngle()) });
+      if (this.readings.length > 120) this.readings.shift();
     };
     window.addEventListener("deviceorientation", this.onOrient);
     this.on = true;
     this.reset();
+    this.startTracking();
   }
 
   stop() {
+    this.on = false;
     if (this.stream) this.stream.getTracks().forEach((t) => t.stop());
     this.stream = null;
     window.removeEventListener("deviceorientation", this.onOrient);
     this.video.srcObject = null;
     this.video.hidden = true;
-    this.on = false;
     this.R = null;
+    this.track = null;
+    if (this.worker) this.worker.postMessage({ type: "reset" });
     this.reset();
   }
 
+  // ---------------------------------------------------------------- floor tracking
+  startTracking() {
+    this.track = null;
+    this.busy = false;
+    if (!this.worker) {
+      try {
+        this.worker = new Worker(new URL("./track-worker.js", import.meta.url), { type: "module" });
+      } catch (e) {
+        this.trackError = String(e && e.message || e);
+        return;
+      }
+      this.worker.onmessage = (ev) => this.onTrack(ev.data);
+      this.worker.onerror = (e) => { this.trackError = e.message || "the tracking worker failed"; this.busy = false; };
+    }
+    this.worker.postMessage({ type: "reset" });
+    this.grab = this.grab || document.createElement("canvas");
+    this.grabCtx = this.grabCtx || this.grab.getContext("2d", { willReadFrequently: true });
+    const next = () => {
+      if (!this.on) return;
+      if (this.video.requestVideoFrameCallback) this.video.requestVideoFrameCallback((now) => { this.sendFrame(now); next(); });
+      else setTimeout(() => { this.sendFrame(performance.now()); next(); }, 33);
+    };
+    next();
+  }
+
+  // Hands the camera frame now showing to the tracker, with the sensor readings since the last one.
+  sendFrame(time) {
+    if (!this.on || this.busy || this.trackError || !this.readings.length) return;
+    const vw = this.video.videoWidth, vh = this.video.videoHeight;
+    if (!vw || !vh) return;
+    const k = TRACK_LONG / Math.max(vw, vh);
+    const w = Math.round(vw * k), h = Math.round(vh * k);
+    if (this.grab.width !== w || this.grab.height !== h) {
+      this.grab.width = w;
+      this.grab.height = h;
+    }
+    this.grabCtx.drawImage(this.video, 0, 0, w, h);
+    const img = this.grabCtx.getImageData(0, 0, w, h);
+    const f = 0.5 * Math.max(w, h) / Math.tan(FOV_LONG / 2);
+    const gyro = this.readings;
+    this.readings = [];
+    this.busy = true;
+    this.worker.postMessage({ type: "frame", rgba: img.data.buffer, w, h, f, time, gyro, height: this.height },
+                            [img.data.buffer]);
+  }
+
+  onTrack(m) {
+    this.busy = false;
+    if (m.type === "error") { this.trackError = m.message; return; }
+    if (m.type === "pose" && this.on && m.C) this.track = m;
+  }
+
+  // Tracking state for the hints and the readout: "tracking", "searching" (not enough floor
+  // texture yet), "lost", "rotation" (no tracker: rotation only).
+  trackState() {
+    if (this.trackError) return "rotation";
+    if (!this.track) return "searching";
+    return this.track.state === "started" ? "tracking" : this.track.state;
+  }
+
+  // ---------------------------------------------------------------- camera
   screenAngle() {
     if (screen.orientation && typeof screen.orientation.angle === "number") return screen.orientation.angle;
     return typeof window.orientation === "number" ? window.orientation : 0;
@@ -136,19 +209,26 @@ export class LookAroundAR {
     return fVideo * k * (canvasW / cssW);
   }
 
+  // Camera -> world rotation: the tracker's (for the camera frame on screen) or the gyroscope's.
   camera() {
+    if (this.track) return this.track.C;
     return this.R ? cameraToWorld(this.R, this.screenAngle()) : null;
+  }
+
+  position() {
+    return this.track ? this.track.T : [0, 0, 0];
   }
 
   // Put the scene where the tap at canvas pixel (x, y) meets the floor. Returns false if it doesn't.
   place(x, y, w, h, f, header) {
     const C = this.camera();
     if (!C) return false;
+    const T = this.position();
     const len = Math.hypot((x - w / 2) / f, (y - h / 2) / f, 1);
-    const P = floorHit(C, [(x - w / 2) / f / len, (y - h / 2) / f / len, 1 / len], this.height);
+    const P = floorHit(C, [(x - w / 2) / f / len, (y - h / 2) / f / len, 1 / len], this.height, 8, T);
     if (!P) return false;
     this.placed = P;
-    this.S = standOnFloor(P, header.front, 0);
+    this.S = standOnFloor(P, header.front, 0, T);
     this.turn = 0;
     return true;
   }
@@ -156,7 +236,7 @@ export class LookAroundAR {
   // Another scene: it stands where the last one stood, facing the camera.
   sceneChanged(header) {
     if (this.placed) {
-      this.S = standOnFloor(this.placed, header.front, 0);
+      this.S = standOnFloor(this.placed, header.front, 0, this.position());
       this.turn = 0;
     }
   }
@@ -174,13 +254,14 @@ export class LookAroundAR {
   view(stats, canvasW, cssW, cssH) {
     const C = this.camera();
     if (!C) return null;
+    const T = this.position();
     const f = this.focal(canvasW, cssW, cssH);
     const W2C = transpose(C);
-    const out = { focal: f, world: { rows: W2C, t: [0, 0, 0] }, reticle: null };
+    const out = { focal: f, world: { rows: W2C, t: mulv(W2C, T).map((v) => -v) }, reticle: null };
     const s = this.scale(stats);
     const footprint = 1.1 * s * stats.radius;          // radius of the floor the scene covers
     if (!this.placed) {
-      out.reticle = floorHit(C, [0, 0, 1], this.height);
+      out.reticle = floorHit(C, [0, 0, 1], this.height, 8, T);
       out.reticleRadius = Math.max(0.1, Math.min(0.6, footprint));
       return out;
     }
@@ -188,7 +269,7 @@ export class LookAroundAR {
     const rot = mul(W2C, S);                            // scene -> camera rotation
     const base = mulv(S, [stats.cx, stats.ground, stats.cz]);   // the middle of the scene's base, turned
     const P = this.placed;
-    const t = mulv(W2C, [P[0] - s * base[0], P[1] - s * base[1], P[2] - s * base[2]]);
+    const t = mulv(W2C, [P[0] - s * base[0] - T[0], P[1] - s * base[1] - T[1], P[2] - s * base[2] - T[2]]);
     const rows = (k) => rot.slice(3 * k, 3 * k + 3);
     out.draw = { r0: rows(0).map((v) => v * s), r1: rows(1).map((v) => v * s), r2: rows(2).map((v) => v * s), t };
     out.sort = { r0: rows(0), r1: rows(1), r2: rows(2), t: t.map((v) => v / s), near: 0.03 / s };

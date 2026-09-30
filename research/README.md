@@ -7,7 +7,7 @@ What the renderers in this repository are based on, with the measurements behind
 | [01-splat-math.md](01-splat-math.md) | the math: covariance, EWA projection, anti-aliasing, alpha, compositing, spherical harmonics, formats and their precision |
 | [02-speed.md](02-speed.md) | what makes it fast, measured: tight shapes, sorting variants, data sizes, redraw policy, allocators |
 | [03-quality.md](03-quality.md) | what makes it look wrong: aliasing (Mip-Splatting), popping (StopThePop), view-dependent colour, precision |
-| [04-phones-and-webar.md](04-phones-and-webar.md) | what Safari on an iPhone allows, and AR without WebXR |
+| [04-phones-and-webar.md](04-phones-and-webar.md) | what Safari on an iPhone allows, AR without WebXR, and how the floor tracking works (with measurements) |
 | [analyze_scenes.py](analyze_scenes.py) | the measurements on the six real captures (`python3 research/analyze_scenes.py`) |
 
 ## Findings that changed the code
@@ -30,12 +30,16 @@ What the renderers in this repository are based on, with the measurements behind
 6. **View-dependent colour is scene-dependent:** 16% of the colour variation for glossy
    figurines, 0.2% for a matte plush. SH degree 1 as an option is the next quality step.
 7. **iPhone Safari has no WebXR.** AR in the browser uses the camera plus the motion sensors
-   directly. Rotation tracking is done. Floor tracking (6DoF) is next, in HA++.
+   directly. Floor tracking (6DoF) is done in HA++, compiled to WebAssembly. Every point lies on
+   the floor, so no second view is needed to start. The camera image arrives 50-100 ms after the
+   motion sensor readings. The tracker measures that delay on the fly, and it checks the
+   gyroscope against the image before trusting it. On simulated walks a placed spot stays within
+   1-3 pixels.
 
 ## Next
 
 - v1 compute renderer: exact ellipse–tile test (1.2–3.8× fewer pairs to sort), scaled-f16 covariance.
 - SH degree 1 option in the web format.
-- Floor tracking (6DoF) for the web AR mode.
+- Relocalization for the floor tracker: find the old floor points again after tracking is lost.
 - Measurements on an actual iPhone: the fps the adaptive controller settles on, WebAssembly vs
   JavaScriptCore, radix vs counting sort.

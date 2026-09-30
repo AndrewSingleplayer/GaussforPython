@@ -8,6 +8,7 @@ Output:
   dist/app.html        the same page without <html>/<head>/<body> (for a claude.ai artifact)
   dist/viewer.js, worker.js, engine.mjs          the viewer
   dist/splatweb.wasm   the HA++ module (web/splatweb.ha) compiled to WebAssembly
+  dist/track.wasm, tracker.mjs, track-worker.js  floor tracking for AR (web/track.ha)
   dist/scenes.json, dist/scenes/*.wasm           the scenes (see web/pack.py), each wrapped as a
                                                  WebAssembly module with one data segment
 
@@ -69,7 +70,10 @@ def main():
         wasm = happ_build(os.path.join(HERE, "splatweb.ha"), ["web-wasm32"], tmp, quiet=True,
                           bridges=False)["web-wasm32"]
         shutil.copyfile(wasm, os.path.join(DIST, "splatweb.wasm"))
-    for f in ("engine.mjs", "worker.js", "viewer.js", "ar.js"):
+        wasm = happ_build(os.path.join(HERE, "track.ha"), ["web-wasm32"], tmp, quiet=True,
+                          bridges=False)["web-wasm32"]
+        shutil.copyfile(wasm, os.path.join(DIST, "track.wasm"))
+    for f in ("engine.mjs", "worker.js", "viewer.js", "ar.js", "tracker.mjs", "track-worker.js"):
         shutil.copyfile(os.path.join(HERE, "src", f), os.path.join(DIST, f))
     entries = []
     for name in names:

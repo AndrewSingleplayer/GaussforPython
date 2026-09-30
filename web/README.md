@@ -19,6 +19,19 @@ python3 -m http.server -d web/dist 8000     # then open http://localhost:8000
 
 If a browser refuses WebAssembly, the same decode and sort run in JavaScript (`src/engine.mjs`). The page shows which one is running.
 
+## AR without WebXR
+
+Safari on iPhone has no WebXR, so the page does what ARKit would: it finds the floor and follows it.
+
+| Step | Where | What |
+|---|---|---|
+| Rotation | main thread | the motion sensors (`DeviceOrientation`) give which way the camera points and which way is down |
+| Floor | main thread | the horizontal plane 1.35 m below the phone (a phone held by a standing adult). A ring shows where the middle of the screen meets it; a tap stands the scene there, 0.7 m tall, with a soft shadow |
+| Floor tracking | Web Worker, **HA++ → WebAssembly** | `track.ha`: corners on the floor (Shi-Tomasi), followed from frame to frame (pyramidal Lucas-Kanade, checked backward), the camera pose that puts them where they are seen (robust Gauss-Newton). `src/tracker.mjs` keeps the map of floor points. Every point lies on the floor, so its depth is known at once and the floor's height sets the scale |
+| Timing | Web Worker | camera frames reach the page 50-100 ms after the motion sensor readings. The tracker measures that delay from how the gyroscope's turning and the image's turning line up, and a search of the whole image's shift catches what the gyroscope gets wrong |
+
+On simulated walks (`tests/track_sim.py`: a textured floor rendered for a moving camera, sensors with delay, drift and noise) a spot on the floor is drawn within 1-3 pixels of the tracking image of where it really is. That holds on terrazzo, tiles, wood and carpet, through 275°/s turns, rolling shutter and motion blur, and after a full 360° walk around it. Each frame takes about 2 ms. `tests/test_track.py` runs four of these walks.
+
 ## Files
 
 | File | What |
@@ -28,6 +41,8 @@ If a browser refuses WebAssembly, the same decode and sort run in JavaScript (`s
 | `build.py` | builds everything into `dist/`: the page as a full document (`index.html`) and as a fragment for a claude.ai artifact (`app.html`) |
 | `src/viewer.js` | WebGL2 drawing, touch controls, quality control |
 | `src/worker.js`, `src/engine.mjs` | the worker and the engine (HA++ WebAssembly, or the JavaScript fallback) |
+| `track.ha`, `src/tracker.mjs`, `src/track-worker.js` | floor tracking for AR: the pixel work in HA++, the map and the timing in JavaScript |
+| `src/ar.js` | camera, motion sensors, the floor, placing the scene |
 
 The scene files in `dist/scenes/` are WebAssembly modules whose only content is one data segment holding the `.hspl` bytes, at the offset listed in `scenes.json`. Some hosts serve only web file types; a claude.ai artifact is one. The viewer reads the bytes directly and never needs to run these modules.
 
