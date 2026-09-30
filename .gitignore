@@ -4,3 +4,4 @@ build/
 .work/
 /splats.png
 gaussian/data/
+bench/.cache/

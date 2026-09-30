@@ -14,6 +14,8 @@ export fn t_tlsf_largest_free(t: *Tlsf) -> u64 { return tlsf_largest_free(t); }
 export fn t_tlsf_used(t: *Tlsf) -> u64 { return t.used; }
 export fn t_tlsf_check(t: *Tlsf) -> i32 { return tlsf_check(t); }
 
+export fn t_mem_copy(dst: *u8, src: *u8, n: u64) { mem_copy(dst, src, n); }
+
 export fn t_sizeof_arena() -> u64 { return size_of(Arena); }
 export fn t_arena_init(a: *Arena, mem: *u8, size: u64) { arena_init(a, mem, size); }
 export fn t_arena_alloc(a: *Arena, size: u64, align: u64) -> *u8 { return arena_alloc(a, size, align); }

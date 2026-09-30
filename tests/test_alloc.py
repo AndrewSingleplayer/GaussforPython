@@ -6,7 +6,7 @@ Every operation is checked against a model kept in Python:
   - results are aligned, inside the managed memory and never overlap a live block;
   - the bytes of every live block survive all other operations (the allocator's
     own bookkeeping never writes into user data);
-  - realloc keeps the old contents;
+  - realloc keeps the old contents, and mem_copy copies exactly its bytes;
   - a failed allocation happens only when no free block is big enough;
   - after every operation, tlsf_check() walks all blocks and lists and finds
     every invariant intact (links, flags, merged neighbours, bitmaps, byte counts).
@@ -51,6 +51,7 @@ def load_lib():
         "t_tlsf_malloc": ([P, U64], P), "t_tlsf_free": ([P, P], None), "t_tlsf_realloc": ([P, P, U64], P),
         "t_tlsf_block_size": ([P], U64), "t_tlsf_largest_free": ([P], U64), "t_tlsf_used": ([P], U64),
         "t_tlsf_check": ([P], ctypes.c_int32),
+        "t_mem_copy": ([P, P, U64], None),
         "t_sizeof_arena": ([], U64), "t_arena_init": ([P, P, U64], None), "t_arena_alloc": ([P, U64, U64], P),
         "t_arena_mark": ([P], U64), "t_arena_reset_to": ([P, U64], None), "t_arena_peak": ([P], U64),
         "t_sizeof_pool": ([], U64), "t_pool_init": ([P, P, U64, U64, U64], U64), "t_pool_alloc": ([P], P),
@@ -296,6 +297,21 @@ class Tlsf(unittest.TestCase):
             p = lib.t_tlsf_malloc(t, 5000)
             self.assertTrue(t + lib.t_sizeof_tlsf() <= p < heap.hi)
             self.assertFalse(lib.t_tlsf_create(heap.lo, 100))     # too small for the control block
+
+
+class MemCopy(unittest.TestCase):
+    def test_every_alignment_and_length(self):
+        lib = load_lib()
+        rng = np.random.default_rng(8)
+        src = rng.integers(0, 256, 6000, dtype=np.uint8)
+        for step in range(3000):
+            n = int(rng.integers(0, 5000)) if step % 3 else int(rng.integers(0, 70))
+            so, do = int(rng.integers(0, 64)), int(rng.integers(0, 64))
+            dst = np.full(6000, 0xEE, np.uint8)
+            lib.t_mem_copy(dst.ctypes.data + 200 + do, src.ctypes.data + so, n)
+            want = np.full(6000, 0xEE, np.uint8)
+            want[200 + do:200 + do + n] = src[so:so + n]
+            self.assertTrue((dst == want).all(), f"n={n} src+{so} dst+{do}")
 
 
 class Arena(unittest.TestCase):

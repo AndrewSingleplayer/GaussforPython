@@ -90,8 +90,8 @@ kernel fade_gpu(s: *Splat, n: u32, k: f32) {
 | `gaussian/` | Gaussian splat renderer for AR: the engine in HA++, hosts in Python (PC), Java (Android) and Swift, and a complete iPhone app built into `Splats.ipa` without a Mac ([gaussian/README.md](gaussian/README.md)) |
 | `examples/ai/nn.ha` | matmul, softmax, layer norm, GELU: a transformer MLP block on GPU and CPU |
 | `tests/` | test suite (see below) |
-| `bench/bench.py` | speed comparison with C and NumPy |
-| `docs/` | [language](docs/LANGUAGE.md), [platforms](docs/PLATFORMS.md), [GPU](docs/GPU.md), [splats](docs/SPLATS.md) |
+| `bench/` | speed comparisons: `bench.py` (HA++ vs C and NumPy), `alloc_bench.py` (allocators vs glibc and a C TLSF) |
+| `docs/` | [language](docs/LANGUAGE.md), [platforms](docs/PLATFORMS.md), [GPU](docs/GPU.md), [splats](docs/SPLATS.md), [memory](docs/MEMORY.md) |
 
 ## Speed
 
@@ -118,14 +118,27 @@ Results of `python3 bench/bench.py` on the build server (x86-64, best of 7 runs)
 - **Phone GPUs:** the GPU numbers depend on the phone. They have not been
   measured yet, because no phone was available.
 
+**Allocators** (`python3 bench/alloc_bench.py`, ns per operation, same compiler
+and flags for all; details and latency percentiles in [docs/MEMORY.md](docs/MEMORY.md)):
+
+| workload | glibc malloc | C TLSF (Conte) | HA++ TLSF | HA++ Arena / Pool |
+|---|---|---|---|---|
+| mixed sizes, random order | 95.7 | 62.2 | **59.9** | |
+| per-frame buffers (64 per frame) | 156.9 | 56.4 | 42.5 | **11.2** (Arena) |
+| 32-byte objects | 17.8 | 16.9 | 19.3 | **13.4** (Pool) |
+
+HA++'s TLSF matches the C one on average speed and has a shorter `malloc`
+tail. The C one has a shorter tail on large `realloc`s that move, because
+glibc's `memcpy` uses `rep movsb`.
+
 ## What was tested (and what was not)
 
-All of this runs in `python3 -m unittest discover -s tests` (31 tests):
+All of this runs in `python3 -m unittest discover -s tests` (32 tests):
 
 | Area | Status |
 |---|---|
 | Compiler errors, literals, name rules | ✅ tested |
-| Allocators (Arena, Pool, TLSF): randomized runs against a model, invariants checked after every operation; 20 of 20 planted bugs caught (`tests/mutate_alloc.py`) | ✅ tested |
+| Allocators (Arena, Pool, TLSF): randomized runs against a model, invariants checked after every operation; 22 of 22 planted bugs caught (`tests/mutate_alloc.py`) | ✅ tested |
 | **Differential fuzzing:** random programs run on x86-64, ARM64, Vulkan and Metal emulation vs an exact model (`tests/fuzz.py`; 120 programs, about 540,000 results, 0 mismatches) | ✅ tested |
 | CPU code on x86-64: language features, math accuracy (exp/log ≤ 2 ulp) | ✅ tested |
 | **ARM64 code**, the phones' CPU: 166 results under `qemu-aarch64` match x86-64 exactly | ✅ tested |

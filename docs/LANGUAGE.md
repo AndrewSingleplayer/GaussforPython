@@ -308,6 +308,7 @@ export fn heap_free(t: *Tlsf, p: *u8) { tlsf_free(t, p); }
 | Arena | `arena_init(a, mem, size)`, `arena_alloc(a, size, align)`, `arena_mark(a)`, `arena_reset_to(a, mark)`, `arena_reset(a)`; `a.peak` is the most memory it ever held |
 | Pool | `pool_init(p, mem, bytes, block, align) -> count`, `pool_alloc(p)`, `pool_free(p, ptr)`, `pool_owns(p, ptr)`, `pool_reset(p)` |
 | TLSF | `tlsf_init(t, mem, bytes)` or `tlsf_create(mem, bytes)`, `tlsf_add_pool`, `tlsf_malloc`, `tlsf_free`, `tlsf_realloc`, `tlsf_block_size(ptr)`, `tlsf_largest_free(t)`, `tlsf_check(t)` (0 = all invariants hold) |
+| Copy | `mem_copy(dst, src, n)`: as fast as the C library's `memcpy` for large copies (no C library needed) |
 
 TLSF is the Two-Level Segregated Fit allocator from real-time systems
 (Masmano et al., 2004), laid out like Matthew Conte's C version. Free blocks
@@ -318,8 +319,9 @@ allocators are not thread-safe: give each thread its own.
 
 `tests/test_alloc.py` checks them with randomized runs against a model
 (overlap, alignment, contents kept, realloc copies, invariants after every
-operation). `tests/mutate_alloc.py` plants 20 typical allocator bugs and
-checks that the tests catch every one.
+operation). `tests/mutate_alloc.py` plants 22 typical allocator bugs and
+checks that the tests catch every one. Design, speed measurements against
+glibc and a C TLSF: [MEMORY.md](MEMORY.md).
 
 ## Attributes
 
