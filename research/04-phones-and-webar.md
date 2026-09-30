@@ -126,6 +126,29 @@ The measured delay converges to the true one (20, 50, 100 ms). Each frame takes 
 Node (WebAssembly), 1-5 ms in headless Chromium. In the browser, with a synthetic camera video
 (`--use-file-for-fake-video-capture`), the page's tracker followed a 1.0 m slide to within 1 cm.
 
+**Tables.** The tracker starts with the floor. When a table comes into view, its points are
+taken for floor points at first, which is all a single view can say. So a new point is on
+probation: it counts 5% in the pose until the phone has moved enough to see it from 3° further
+round, and it still fits. A point on probation that misses by more than 1.5 px is freed at once.
+It is then followed on as a free point, and its place is triangulated from its rays (the point
+nearest to all of them, once they are 4° apart). A freed point that lands on the floor goes back
+to being a floor point. Points 15 cm to 1.6 m above the floor that agree in height (8 or more
+within 5 cm) make a surface, outlined by their convex hull. New points seen on it get their depth
+at once, like floor points, so tracking holds when only the table is in view. The ring and the
+tap go on the nearest surface under the middle of the screen, and a scene on a table stands
+30 cm tall by default (0.7 m on the floor). Before placing, found surfaces are outlined faintly,
+as ARKit apps do.
+
+Measured (tests/track_sim.py --table): the phone looks at the floor, then at a table top while
+walking round it at 1.2 m. On wood a 0.75 m table was found at 0.79 m; on tiles a 0.45 m table at
+0.42 m; on terrazzo a 0.75 m table at 0.63 m. The scene stays within 1 px of its spot on the
+table in all three. The terrazzo case shows the limit: a big table that fills the view within a
+second of starting leaves almost no floor points to hold the scale, and heights come out up to
+15% low. The scene still stands on the table and stays there; only its size in metres is off. In
+headless Chromium with a synthetic video, the page found a 0.60 m table within a second (at
+0.63 m) and put the scene on it. The probation also helps without tables: with boxes on the floor
+the median anchor error fell from 1.5 to 0.7 px.
+
 **Recovery after tracking is lost (floor memory).** While tracking works, every third frame adds
 what the camera sees of the floor to a top-down picture of it (2 cm cells, 12 x 12 m, the running
 mean of up to 15 looks per cell; `floor_map_update` in `track.ha`). Seen from above, a flat floor

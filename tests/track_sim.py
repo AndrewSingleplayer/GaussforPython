@@ -191,8 +191,9 @@ def smooth(x):
 class Walk:
     """Stand, walk `arc` degrees around a spot on the floor keeping it in view, stand again."""
 
-    def __init__(self, seconds=8.0, arc=150.0, radius=1.7, height=1.35, seed=2, turns=0.0, crouch=0.0):
+    def __init__(self, seconds=8.0, arc=150.0, radius=1.7, height=1.35, seed=2, turns=0.0, crouch=0.0, look_up=0.0):
         self.crouch = crouch                                   # metres down and up again, mid-walk
+        self.look_up = look_up                                 # the spot looked at is this high (a table top)
         self.seconds, self.arc, self.radius, self.height = seconds, math.radians(arc), radius, height
         self.turns = math.radians(turns)                      # quick look away and back, peak angle
         self.anchor = np.array([0.0, radius, -height])        # the spot, north of the start
@@ -208,8 +209,10 @@ class Walk:
         if self.crouch:
             T[2] -= self.crouch * math.sin(math.pi * min(max((t - 2.0) / (self.seconds - 4.0), 0), 1)) ** 2
         T[0:2] += 0.004 * np.sin(t * np.array([7.1, 5.3]) + self.shake[0, :2])
-        look = self.anchor + np.array([0.12 * math.sin(0.9 * t + self.shake[1, 0]),
-                                       0.10 * math.sin(0.7 * t + self.shake[1, 1]), 0.05])
+        up = self.look_up * smooth((t - 1.0) / 1.0)            # the floor first, then up to the table top
+        side = np.array([0.9, -0.5, 0.0]) * (1 - smooth((t - 1.0) / 1.0)) if self.look_up else 0.0
+        look = self.anchor + side + np.array([0.12 * math.sin(0.9 * t + self.shake[1, 0]),
+                                              0.10 * math.sin(0.7 * t + self.shake[1, 1]), 0.05 + up])
         C = look_at(T, look, roll=math.radians(3) * math.sin(0.5 * t + self.shake[2, 0]))
         if self.turns:                                         # two quick turns of the head/phone
             for t0 in (2.5, 5.0):
@@ -223,17 +226,21 @@ class Walk:
 def simulate(seconds=8.0, arc=150.0, latency=0.05, drift_deg_s=0.4, gyro_noise_deg=0.05,
              assumed_height=1.35, true_height=1.35, contrast=1.0, seed=3, keep_frames=False,
              true_fov=67.0, exposure_ms=0.0, boxes=False, turns=0.0, floor="terrazzo", readout_ms=0.0,
-             crouch=0.0, noise=2.0, blackout=None, options=None):
+             crouch=0.0, noise=2.0, blackout=None, options=None, table=None, radius=1.7):
     rng = np.random.default_rng(seed)
     tex, texel = floor_texture(seed=seed, contrast=contrast, kind=floor)
     levels = texture_levels(tex)
-    walk = Walk(seconds, arc, height=true_height, seed=seed, turns=turns, crouch=crouch)
+    walk = Walk(seconds, arc, radius=radius, height=true_height, seed=seed, turns=turns, crouch=crouch,
+                look_up=table or 0.0)
     focal = 0.5 * H / math.tan(math.radians(true_fov) / 2)
     box_list = []
     if boxes:      # a low table, a box and a chair-sized block around the walk
         fz = -true_height
         box_list = [((-1.2, 2.2, fz), (-0.6, 2.9, fz + 0.45)), ((0.9, 0.9, fz), (1.3, 1.3, fz + 0.3)),
                     ((-0.4, 3.6, fz), (0.4, 4.0, fz + 0.9))]
+    if table:                     # a 0.9 x 0.8 m table under the spot looked at
+        fz = -true_height
+        box_list = box_list + [((-0.45, radius - 0.4, fz), (0.45, radius + 0.4, fz + table))]
     n = int(seconds * FPS)
     frames = np.zeros((n, H, W), np.uint8)
     truth = []
@@ -288,6 +295,11 @@ def simulate(seconds=8.0, arc=150.0, latency=0.05, drift_deg_s=0.4, gyro_noise_d
         with open(opath) as fh:
             out = json.load(fh)
 
+    if table:
+        r = evaluate_table(truth, out, assumed_height, true_height, table, radius)
+        if keep_frames:
+            r["out"], r["truth"] = out, truth
+        return r
     res = evaluate(truth, out, assumed_height, true_height)
     if blackout:                  # how far off the spot is once the camera sees again
         after = [e for k, e in enumerate(res["anchor_errors"]) if k / FPS >= blackout[1] + 0.5]
@@ -376,6 +388,68 @@ def evaluate(truth, out, assumed_height, true_height):
     }
 
 
+def evaluate_table(truth, out, assumed_height, true_height, table, radius, place_at=4.0):
+    """The table test: the surface found (its height above the floor), and a scene put where the
+    middle of the screen meets a surface at place_at seconds: how far it is drawn from the real
+    spot on the table top afterwards."""
+    from importlib import import_module  # noqa: F401
+    k0 = int(place_at * FPS)
+    scale = assumed_height / true_height
+    top = -true_height + table
+    lo, hi = np.array([-0.45, radius - 0.4]), np.array([0.45, radius + 0.4])
+    C, T = truth[k0]
+    d = C @ np.array([0, 0, 1.0])
+    s = (top - T[2]) / d[2]
+    P = T + s * d
+    on_table = bool(s > 0 and np.all(P[:2] >= lo) and np.all(P[:2] <= hi))
+    if not on_table:
+        P = T + (-true_height - T[2]) / d[2] * d
+    o = out[k0]
+    Ce, Te = np.array(o["C"]).reshape(3, 3), np.array(o["T"])
+    de = Ce @ np.array([0, 0, 1.0])
+    Pe, found = None, None
+    for pl in sorted(o.get("planes") or [], key=lambda q: -q["n"]):
+        se = (pl["z"] - Te[2]) / de[2]
+        X = Te + se * de
+        if se > 0 and inside(pl["hull"], X[0], X[1], 0.05):
+            Pe, found = X, pl
+            break
+    if Pe is None:
+        Pe = Te + (-assumed_height - Te[2]) / de[2] * de
+    errs = []
+    for k in range(k0, len(out)):
+        a = project(truth[k][0], truth[k][1], P)
+        b = project(np.array(out[k]["C"]).reshape(3, 3), np.array(out[k]["T"]), Pe)
+        if a is not None and b is not None:
+            errs.append(float(np.linalg.norm(a - b)))
+    planes = out[-1].get("planes") or []
+    main = max(planes, key=lambda q: q["n"]) if planes else None
+    return {
+        "planes": len(planes),
+        "table_height_found": (main["z"] + assumed_height) / scale if main else float("nan"),
+        "table_height_true": table,
+        "true_spot_on_table": on_table,
+        "placed_on_table": found is not None,
+        "placed_height": float(Pe[2] + assumed_height) / scale,
+        "anchor_px_median": float(np.median(errs)) if errs else float("nan"),
+        "anchor_px_max": float(np.max(errs)) if errs else float("nan"),
+        "lost_frames": sum(o["state"] in ("lost", "searching") for o in out),
+        "ms_median": float(np.median([o["ms"] for o in out])),
+        "anchor_errors": errs,
+    }
+
+
+def inside(hull, x, y, margin):
+    if len(hull) < 3:
+        return any(math.hypot(a - x, b - y) <= margin for a, b in hull)
+    for i in range(len(hull)):
+        (ax, ay), (bx, by) = hull[i], hull[(i + 1) % len(hull)]
+        ex, ey = bx - ax, by - ay
+        if (ex * (y - ay) - ey * (x - ax)) / (math.hypot(ex, ey) or 1) < -margin:
+            return False
+    return True
+
+
 def draw_gif(res, path):
     """The frames with the anchor where the tracker puts it (red) and where it really is (green)."""
     from PIL import Image, ImageDraw
@@ -419,12 +493,15 @@ def main():
     ap.add_argument("--noise", type=float, default=2.0, help="camera noise, grey levels (RMS)")
     ap.add_argument("--blackout", type=float, nargs=2, help="cover the camera from .. to (seconds)")
     ap.add_argument("--no-reloc", action="store_true", help="without the floor memory")
+    ap.add_argument("--table", type=float, help="a table this high (metres) under the spot looked at")
+    ap.add_argument("--radius", type=float, default=1.7, help="distance kept from the spot")
     args = ap.parse_args()
     res = simulate(args.seconds, args.arc, args.latency, true_height=args.true_height,
                    contrast=args.contrast, seed=args.seed, keep_frames=bool(args.gif),
                    true_fov=args.true_fov, exposure_ms=args.exposure_ms, boxes=args.boxes, turns=args.turns,
                    floor=args.floor, readout_ms=args.readout_ms, crouch=args.crouch, noise=args.noise,
-                   blackout=args.blackout, options={"relocalize": not args.no_reloc})
+                   blackout=args.blackout, options={"relocalize": not args.no_reloc}, table=args.table,
+                   radius=args.radius)
     for k, v in res.items():
         if k not in ("anchor_errors", "frames", "truth", "out"):
             print(f"{k:22s} {v:.3f}" if isinstance(v, float) else f"{k:22s} {v}")

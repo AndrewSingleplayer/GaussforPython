@@ -24,6 +24,15 @@
 // The floor height sets the scale, and because every point lies on the floor, the depth of a new
 // point is known at once: no second view is needed to start.
 //
+// Tables (and other flat surfaces above the floor): a point that doesn't fit the floor isn't thrown
+// away but followed on as a free point, and its real place is triangulated from the rays it was
+// seen along as the phone moves (once they are 4 degrees apart). Free points at the same height
+// (8 or more within 5 cm, 15 cm to 1.6 m above the floor) make a surface, with the outline of its
+// points. New points seen on a known surface get their depth at once, like floor points, and the
+// ring and the scene go on the nearest surface under the screen. A new point counts for little
+// (on probation) until the phone has moved enough to see it from 3 degrees further round and it
+// still fits: until then, points on a table that are taken for floor can't bend the pose.
+//
 // Floor memory: while tracking works, what the camera sees of the floor is added to a top-down
 // picture of it (2 cm cells, track.ha). When tracking is lost, it starts again at once from where
 // it was (the rotation from the gyroscope), and meanwhile the floor it sees now, seen from above,
@@ -68,6 +77,14 @@ const RELOC_CLEAR = 0.08; // and by how much it must beat the other candidates, 
 const RELOC_TRIES = 5;    // candidates from the 8 cm search looked at in 2 cm cells
 const RELOC_GIVE_UP = 10000;  // ms: then the old picture is dropped and a new one started
 const PATCH_MAX = 160;    // cells across the patch compared with the picture
+const MAX_FREE = 60;      // points being triangulated at a time
+const TRI_ANGLE = 4 * Math.PI / 180;   // rays this far apart give a point's place
+const PLANE_MIN = 8;      // points at one height that make a surface
+const PLANE_BAND = 0.05;  // metres: how close in height they must be
+const PLANE_LOW = 0.15, PLANE_HIGH = 1.6;   // metres above the floor a surface can be
+const CONFIRM_ANGLE = 3 * Math.PI / 180;    // a new point is confirmed once seen this far round
+const PROBATION = 0.05;   // how much a point on probation counts
+const PROBATION_PX = 1.5; // a point on probation that is off by more than this is freed at once
 
 const mul = (a, b) => {
   const r = new Array(9);
@@ -102,6 +119,35 @@ export function orthonormalize(m) {
   return [a[0], b[0], c[0], a[1], b[1], c[1], a[2], b[2], c[2]];
 }
 
+// Convex hull of 2D points (Andrew's monotone chain), counter-clockwise.
+export function convexHull(pts) {
+  const p = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  if (p.length < 3) return p;
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lower = [], upper = [];
+  for (const q of p) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], q) <= 0) lower.pop();
+    lower.push(q);
+  }
+  for (let i = p.length - 1; i >= 0; i--) {
+    const q = p[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], q) <= 0) upper.pop();
+    upper.push(q);
+  }
+  return lower.slice(0, -1).concat(upper.slice(0, -1));
+}
+
+// Whether (x, y) is inside a counter-clockwise convex polygon, or within `margin` metres of it.
+export function insideHull(hull, x, y, margin = 0) {
+  if (hull.length < 3) return hull.some(([a, b]) => Math.hypot(a - x, b - y) <= margin);
+  for (let i = 0; i < hull.length; i++) {
+    const [ax, ay] = hull[i], [bx, by] = hull[(i + 1) % hull.length];
+    const ex = bx - ax, ey = by - ay, len = Math.hypot(ex, ey) || 1;
+    if ((ex * (y - ay) - ey * (x - ax)) / len < -margin) return false;
+  }
+  return true;
+}
+
 export class FloorTracker {
   constructor(instance) {
     this.ex = instance.exports;
@@ -112,6 +158,11 @@ export class FloorTracker {
     this.px = new Float32Array(2 * MAX_POINTS);       // each point's pixel in the last frame
     this.wx = new Float64Array(3 * MAX_POINTS);       // and its place on the floor
     this.bad = new Uint8Array(MAX_POINTS);            // frames in a row it didn't fit
+    this.kind = new Uint8Array(MAX_POINTS);           // 0: on a known surface, 1: free, 2: triangulated
+    this.tri = new Float64Array(9 * MAX_POINTS);      // sum of (I - d d^T), sum of (I - d d^T) o over its rays
+    this.d0 = new Float64Array(3 * MAX_POINTS);       // the first ray it was seen along
+    this.rays = new Uint16Array(MAX_POINTS);          // how many rays it was seen along
+    this.conf = new Uint8Array(MAX_POINTS);           // confirmed (seen from 3 degrees round, fitting)
     // the floor picture lives at the start of the free memory; the per-image buffers come after it
     this.mw = this.mh = Math.round(2 * MAP_HALF / MAP_CELL);
     const cw = this.mw / RELOC_DOWN, cells = this.mw * this.mh, ccells = cw * cw;
@@ -124,7 +175,7 @@ export class FloorTracker {
     if (o > have) this.memory.grow(Math.ceil((o - have) / 65536));
     this.mapAt = at;
     this.base = o;
-    this.opts = { relocalize: true };
+    this.opts = { relocalize: true, triWeight: 0.5 };   // triWeight: how much a triangulated point counts
     this.reset();
   }
 
@@ -156,6 +207,8 @@ export class FloorTracker {
     this.mapTick = 0;
     this.relocTick = 0;
     this.relocs = 0;                  // times the place was found again
+    this.planes = [];                 // surfaces above the floor: { z, hull: [[x, y], ...], n }
+    this.planeTick = 0;
     this.coarseReady = false;
     if (this.mapAt) this.clearMap();
 
@@ -316,7 +369,12 @@ export class FloorTracker {
     for (let i = 0; i < this.n; i++) {
       this.wx[3 * i] += dx;
       this.wx[3 * i + 1] += dy;
+      const t = this.tri, k = 9 * i;                   // the rays' origins move too: b += A (dx, dy, 0)
+      t[k + 6] += t[k] * dx + t[k + 1] * dy;
+      t[k + 7] += t[k + 1] * dx + t[k + 3] * dy;
+      t[k + 8] += t[k + 2] * dx + t[k + 4] * dy;
     }
+    for (const p of this.planes) p.hull = p.hull.map(([x, y]) => [x + dx, y + dy]);
     this.verified = true;
     this.relocs++;
     this.relocShift = Math.hypot(dx, dy);
@@ -433,6 +491,9 @@ export class FloorTracker {
     return { state, ok: state === "tracking" || state === "started", C: this.C.slice(), T: this.T.slice(),
              points: this.n, inliers: this.inliers, ms: performance.now() - t0, lag: this.lag, light,
              verified: this.verified, relocs: this.relocs, mapLooks: this.mapLooks, match: this.lastMatch,
+             planes: this.planes.map((p) => ({ z: p.z, hull: p.hull, n: p.n })),
+             points3d: this.debug ? Array.from({ length: this.n }, (_, i) => i).filter((i) => this.kind[i] === 2)
+               .map((i) => [this.wx[3 * i], this.wx[3 * i + 1], this.wx[3 * i + 2]]) : undefined,
              followed: this.followed, shiftFix: this.shiftFix, gyroOff: this.gyroOff };
   }
 
@@ -446,7 +507,8 @@ export class FloorTracker {
     const Tp = this.T.map((x, i) => x + 0.6 * this.v[i]);
     const Wp = transpose(Cp);
     for (let i = 0; i < n; i++) {
-      const X = [this.wx[3 * i] - Tp[0], this.wx[3 * i + 1] - Tp[1], this.wx[3 * i + 2] - Tp[2]];
+      let X = [this.wx[3 * i] - Tp[0], this.wx[3 * i + 1] - Tp[1], this.wx[3 * i + 2] - Tp[2]];
+      if (this.kind[i] === 1) X = this.ray(this.C, this.px[2 * i], this.px[2 * i + 1]);   // unknown depth: far
       const c = mulv(Wp, X);
       mem.src[2 * i] = this.px[2 * i];
       mem.src[2 * i + 1] = this.px[2 * i + 1];
@@ -488,7 +550,7 @@ export class FloorTracker {
       mem.xyz[3 * i] = this.wx[3 * i];
       mem.xyz[3 * i + 1] = this.wx[3 * i + 1];
       mem.xyz[3 * i + 2] = this.wx[3 * i + 2];
-      mem.wts[i] = good[i];
+      mem.wts[i] = good[i] ? this.weight(i) : 0;
     }
     // 3. pose. First from the image alone (the gyroscope barely counts): with a robust loss each
     // point's pull is capped, so a wrong gyroscope reading (a wrong delay, a glitch) could win.
@@ -500,7 +562,7 @@ export class FloorTracker {
     mem.prm.set([...Wp, WEAK_PRIOR, 1.5 / f]);
     mem.prmU[11] = 10;
     this.ex.solve_pose(n, at.obs, at.xyz, at.wts, at.pose, at.prm, at.resid);
-    for (let i = 0; i < n; i++) mem.wts[i] = good[i] && mem.resid[i] * f < 3 * INLIER_PX ? 1 : 0;
+    for (let i = 0; i < n; i++) mem.wts[i] = good[i] && mem.resid[i] * f < 3 * INLIER_PX ? this.weight(i) : 0;
     const Cv = transpose(Array.from(mem.pose.subarray(0, 9)));
     const disagree = Math.hypot(...rotvec(mul(transpose(Cp), Cv)));
     this.gyroOff = disagree;
@@ -508,7 +570,7 @@ export class FloorTracker {
     mem.prmU[11] = 6;
     this.ex.solve_pose(n, at.obs, at.xyz, at.wts, at.pose, at.prm, at.resid);
     let inliers = 0;
-    for (let i = 0; i < n; i++) if (good[i] && mem.resid[i] * f < INLIER_PX) inliers++;
+    for (let i = 0; i < n; i++) if (good[i] && this.kind[i] !== 1 && mem.resid[i] * f < INLIER_PX) inliers++;
     this.inliers = inliers;
     if (inliers < MIN_POINTS) {
       // lost: keep the position, turn with the gyroscope, start a new map from here
@@ -526,23 +588,171 @@ export class FloorTracker {
     this.C = C;
     this.T = T;
     this.lostFrames = 0;
-    // 4. keep the points that fit
-    let m = 0;
+    // 4. keep the points that fit; a point followed well that doesn't fit the floor may be on
+    // something else (a table): it becomes free, and its place is triangulated as the phone moves
+    let m = 0, free = 0;
+    for (let i = 0; i < n; i++) free += this.kind[i] === 1;
     for (let i = 0; i < n; i++) {
-      const e = mem.resid[i] * f;
-      if (!good[i] || e > 3 * INLIER_PX) continue;
-      const bad = e > INLIER_PX ? this.bad[i] + 1 : 0;
-      if (bad > 2) continue;
-      this.px[2 * m] = mem.dst[2 * i];
-      this.px[2 * m + 1] = mem.dst[2 * i + 1];
-      this.wx[3 * m] = this.wx[3 * i];
-      this.wx[3 * m + 1] = this.wx[3 * i + 1];
-      this.wx[3 * m + 2] = this.wx[3 * i + 2];
-      this.bad[m] = bad;
+      if (!good[i]) continue;
+      const u = mem.dst[2 * i], v = mem.dst[2 * i + 1];
+      if (this.kind[i] === 1) {
+        this.addRay(i, u, v);
+        if (!this.promote(i, u, v)) {
+          if (this.rays[i] > 90) continue;               // seen for 3 s without a place: drop it
+        }
+      } else {
+        const e = mem.resid[i] * f;
+        const bad = e > INLIER_PX ? this.bad[i] + 1 : 0;
+        const doubt = this.kind[i] === 0 && !this.conf[i] && e > PROBATION_PX;
+        if (e > 3 * INLIER_PX || bad > 2 || doubt) {
+          if (this.kind[i] !== 0 || free >= MAX_FREE) continue;
+          this.kind[i] = 1;                              // doesn't fit the floor: free it
+          this.tri.fill(0, 9 * i, 9 * i + 9);
+          this.addRay(i, u, v, true);
+          free++;
+        } else {
+          this.bad[i] = bad;
+          if (this.kind[i] === 2) { this.addRay(i, u, v); this.promote(i, u, v); }
+          if (!this.conf[i] && e < INLIER_PX) {           // seen from far enough round, still fitting
+            const d = this.ray(this.C, u, v), d0 = this.d0;
+            const c = d[0] * d0[3 * i] + d[1] * d0[3 * i + 1] + d[2] * d0[3 * i + 2];
+            if (Math.acos(Math.min(1, c)) > CONFIRM_ANGLE) this.conf[i] = 1;
+          }
+        }
+      }
+      this.px[2 * i] = u;
+      this.px[2 * i + 1] = v;
+      this.movePoint(m, i);
       m++;
     }
     this.n = m;
+    if (++this.planeTick % 10 === 0) this.detectPlanes();
     return "tracking";
+  }
+
+  // Copies point i's state to slot m (m <= i).
+  movePoint(m, i) {
+    if (m === i) return;
+    this.px[2 * m] = this.px[2 * i];
+    this.px[2 * m + 1] = this.px[2 * i + 1];
+    for (let k = 0; k < 3; k++) {
+      this.wx[3 * m + k] = this.wx[3 * i + k];
+      this.d0[3 * m + k] = this.d0[3 * i + k];
+    }
+    for (let k = 0; k < 9; k++) this.tri[9 * m + k] = this.tri[9 * i + k];
+    this.bad[m] = this.bad[i];
+    this.kind[m] = this.kind[i];
+    this.rays[m] = this.rays[i];
+    this.conf[m] = this.conf[i];
+  }
+
+  // How much point i counts in the pose: free points not at all, triangulated ones half, points on
+  // a surface fully once confirmed.
+  weight(i) {
+    const k = this.kind[i];
+    return k === 1 ? 0 : k === 2 ? this.opts.triWeight : this.conf[i] ? 1 : PROBATION;
+  }
+
+  // World direction of the ray through pixel (u, v) for camera rotation C.
+  ray(C, u, v) {
+    const x = (u - this.cx) / this.f, y = (v - this.cy) / this.f, len = Math.hypot(x, y, 1);
+    return mulv(C, [x / len, y / len, 1 / len]);
+  }
+
+  // Adds the current ray through (u, v) to point i's triangulation: tri holds A = sum of (I - d d^T)
+  // (xx, xy, xz, yy, yz, zz) and b = sum of (I - d d^T) o; the place is A^-1 b.
+  addRay(i, u, v, first = false) {
+    const d = this.ray(this.C, u, v), o = this.T, t = this.tri, k = 9 * i;
+    const P = [1 - d[0] * d[0], -d[0] * d[1], -d[0] * d[2], 1 - d[1] * d[1], -d[1] * d[2], 1 - d[2] * d[2]];
+    for (let j = 0; j < 6; j++) t[k + j] += P[j];
+    t[k + 6] += P[0] * o[0] + P[1] * o[1] + P[2] * o[2];
+    t[k + 7] += P[1] * o[0] + P[3] * o[1] + P[4] * o[2];
+    t[k + 8] += P[2] * o[0] + P[4] * o[1] + P[5] * o[2];
+    if (first) {
+      for (let j = 0; j < 3; j++) this.d0[3 * i + j] = d[j];
+      this.rays[i] = 1;
+    } else if (this.rays[i] < 65535) {
+      this.rays[i]++;
+    }
+    this.lastRay = d;
+  }
+
+  // Once point i's rays are far enough apart, its place from them; it then counts like a floor point.
+  promote(i, u, v) {
+    const d = this.lastRay, d0 = [this.d0[3 * i], this.d0[3 * i + 1], this.d0[3 * i + 2]];
+    if (Math.acos(Math.min(1, d[0] * d0[0] + d[1] * d0[1] + d[2] * d0[2])) < TRI_ANGLE || this.rays[i] < 5) return false;
+    const t = this.tri, k = 9 * i;
+    const a = t[k], b = t[k + 1], c = t[k + 2], e = t[k + 3], g = t[k + 4], h = t[k + 5];
+    const det = a * (e * h - g * g) - b * (b * h - g * c) + c * (b * g - e * c);
+    if (Math.abs(det) < 1e-9) return false;
+    const inv = [e * h - g * g, c * g - b * h, b * g - c * e, a * h - c * c, b * c - a * g, a * e - b * b];
+    const r = [t[k + 6], t[k + 7], t[k + 8]];
+    const X = [(inv[0] * r[0] + inv[1] * r[1] + inv[2] * r[2]) / det,
+               (inv[1] * r[0] + inv[3] * r[1] + inv[4] * r[2]) / det,
+               (inv[2] * r[0] + inv[4] * r[1] + inv[5] * r[2]) / det];
+    const cam = mulv(transpose(this.C), [X[0] - this.T[0], X[1] - this.T[1], X[2] - this.T[2]]);
+    if (cam[2] < 0.2) return false;
+    const err = Math.hypot(this.f * cam[0] / cam[2] + this.cx - u, this.f * cam[1] / cam[2] + this.cy - v);
+    if (err > 2 * INLIER_PX || X[2] < -this.height - 0.1) return false;
+    const above = X[2] + this.height;
+    if (this.kind[i] === 1 && above < 0.03) {             // on the floor after all: exactly there
+      this.wx[3 * i] = X[0];
+      this.wx[3 * i + 1] = X[1];
+      this.wx[3 * i + 2] = -this.height;
+      this.kind[i] = 0;
+      this.bad[i] = 0;
+      this.conf[i] = 1;
+      return true;
+    }
+    if (above < 0.08) return false;                     // too close to the floor to tell
+    this.wx[3 * i] = X[0];
+    this.wx[3 * i + 1] = X[1];
+    this.wx[3 * i + 2] = X[2];
+    this.kind[i] = 2;
+    return true;
+  }
+
+  // Surfaces above the floor from the triangulated points (see "Tables" at the top).
+  detectPlanes() {
+    const pts = [];
+    for (let i = 0; i < this.n; i++) {
+      if (this.kind[i] !== 2) continue;
+      const h = this.wx[3 * i + 2] + this.height;
+      if (h > PLANE_LOW && h < PLANE_HIGH) pts.push([this.wx[3 * i], this.wx[3 * i + 1], this.wx[3 * i + 2]]);
+    }
+    if (pts.length < PLANE_MIN) return;
+    pts.sort((p, q) => p[2] - q[2]);
+    let best = null;
+    for (let i = 0, j = 0; i < pts.length; i++) {
+      while (pts[i][2] - pts[j][2] > PLANE_BAND) j++;
+      if (!best || i - j + 1 > best[1] - best[0]) best = [j, i + 1];
+    }
+    const members = pts.slice(best[0], best[1]);
+    if (members.length < PLANE_MIN) return;
+    const z = members[members.length >> 1][2];
+    const near = this.planes.find((p) => Math.abs(p.z - z) < PLANE_BAND &&
+      p.hull.some(([x, y]) => members.some((q) => Math.hypot(q[0] - x, q[1] - y) < 0.6)));
+    if (near) {
+      near.z = (near.z * near.n + z * members.length) / (near.n + members.length);
+      near.n += members.length;
+      near.hull = convexHull([...near.hull, ...members.map((q) => [q[0], q[1]])]);
+    } else {
+      this.planes.push({ z, n: members.length, hull: convexHull(members.map((q) => [q[0], q[1]])) });
+    }
+  }
+
+  // Where the ray through pixel (u, v) meets a surface (the nearest known one above the floor it
+  // falls inside, else the floor), or null.
+  surfacePoint(u, v, down = MIN_DOWN) {
+    const d = this.ray(this.C, u, v);
+    let best = null, bestS = Infinity;
+    for (const p of this.planes) {
+      if (d[2] > -0.05 || p.z > this.T[2] - 0.1) continue;
+      const s = (p.z - this.T[2]) / d[2];
+      const X = [this.T[0] + s * d[0], this.T[1] + s * d[1], p.z];
+      if (s < bestS && insideHull(p.hull, X[0], X[1], 0.05)) { best = X; bestS = s; }
+    }
+    return best || this.floorPoint(u, v, down);
   }
 
   // The floor point seen at pixel (u, v) of the current frame, or null.
@@ -574,7 +784,7 @@ export class FloorTracker {
     for (const k of order) {
       if (this.n >= MAX_POINTS) break;
       const u = mem.cand[3 * k], v = mem.cand[3 * k + 1];
-      const X = this.floorPoint(u, v, 0.8 * MIN_DOWN);
+      const X = this.surfacePoint(u, v, 0.8 * MIN_DOWN);
       if (!X) continue;
       const i = this.n++;
       this.px[2 * i] = u;
@@ -583,6 +793,12 @@ export class FloorTracker {
       this.wx[3 * i + 1] = X[1];
       this.wx[3 * i + 2] = X[2];
       this.bad[i] = 0;
+      this.kind[i] = 0;
+      this.conf[i] = 0;
+      const d = this.ray(this.C, u, v);
+      this.d0[3 * i] = d[0];
+      this.d0[3 * i + 1] = d[1];
+      this.d0[3 * i + 2] = d[2];
     }
   }
 }

@@ -56,6 +56,15 @@ class FloorTracking(unittest.TestCase):
                                  options={"relocalize": False})
         self.assertGreater(off["after_blackout_px"], 50)       # without it, the scene is far off
 
+    def test_table(self):
+        # the phone looks at the floor, then at a 0.75 m table top while walking around it: the
+        # table is found as a surface, the scene goes on it and stays on its spot
+        res = track_sim.simulate(table=0.75, radius=1.2, floor="planks")
+        self.assertTrue(res["placed_on_table"], res)
+        self.assertAlmostEqual(res["table_height_found"], 0.75, delta=0.08)
+        self.assertLess(res["anchor_px_max"], 3.0, res)
+        self.assertEqual(res["lost_frames"], 0)
+
     def test_light_stats(self):
         # the light measurement (web/track.ha) on a frame with a warm left half and a known box
         w, h = 64, 48

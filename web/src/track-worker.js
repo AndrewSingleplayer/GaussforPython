@@ -19,6 +19,7 @@ self.onmessage = async (ev) => {
   } else if (m.type === "frame") {
     const r = tracker.frame(new Uint8Array(m.rgba), m.w, m.h, m.f, m.time, m.gyro, m.height, m.box);
     self.postMessage({ type: "pose", state: r.state, C: r.C, T: r.T, points: r.points, inliers: r.inliers,
-                       ms: r.ms, lag: r.lag, time: m.time, light: r.light, verified: r.verified, relocs: r.relocs });
+                       ms: r.ms, lag: r.lag, time: m.time, light: r.light, verified: r.verified, relocs: r.relocs,
+                       planes: r.planes });
   }
 };

@@ -137,6 +137,25 @@ void main() {
   frag = vec4(texture(u_image, v_uv).rgb, 1.0);
 }`;
 
+// Surfaces the floor tracker found above the floor (tables), outlined faintly before placing.
+const PLANE_VS = `#version 300 es
+precision highp float;
+uniform vec3 u_r0, u_r1, u_r2, u_t;   // world -> camera
+uniform vec2 u_focal, u_size;
+layout(location = 0) in vec3 a_pos;
+void main() {
+  vec3 c = vec3(dot(u_r0, a_pos), dot(u_r1, a_pos), dot(u_r2, a_pos)) + u_t;
+  gl_Position = vec4(2.0 * u_focal.x * c.x / u_size.x, -2.0 * u_focal.y * c.y / u_size.y, 0.0, c.z);
+}`;
+
+const PLANE_FS = `#version 300 es
+precision mediump float;
+uniform float u_alpha;
+out vec4 frag;
+void main() {
+  frag = vec4(vec3(u_alpha), u_alpha);
+}`;
+
 // ------------------------------------------------------------------ WebGL setup
 const gl = canvas.getContext("webgl2", { antialias: false, alpha: true, premultipliedAlpha: true,
                                          powerPreference: "high-performance", depth: false, stencil: false });
@@ -218,6 +237,44 @@ function drawCamera(i, w, h) {
   gl.activeTexture(gl.TEXTURE0);
   gl.useProgram(prog);
   return true;
+}
+
+const planeProg = gl.createProgram();
+gl.attachShader(planeProg, shader(gl.VERTEX_SHADER, PLANE_VS));
+gl.attachShader(planeProg, shader(gl.FRAGMENT_SHADER, PLANE_FS));
+gl.linkProgram(planeProg);
+if (!gl.getProgramParameter(planeProg, gl.LINK_STATUS)) fail("Shader link error: " + gl.getProgramInfoLog(planeProg));
+const PU = {};
+for (const name of ["u_r0", "u_r1", "u_r2", "u_t", "u_focal", "u_size", "u_alpha"]) PU[name] = gl.getUniformLocation(planeProg, name);
+const planeVao = gl.createVertexArray();
+const planeBuf = gl.createBuffer();
+gl.bindVertexArray(planeVao);
+gl.bindBuffer(gl.ARRAY_BUFFER, planeBuf);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+
+function drawPlanes(world, planes, f, w, h) {
+  if (!planes.length) return;
+  gl.useProgram(planeProg);
+  gl.uniform3fv(PU.u_r0, world.rows.slice(0, 3));
+  gl.uniform3fv(PU.u_r1, world.rows.slice(3, 6));
+  gl.uniform3fv(PU.u_r2, world.rows.slice(6, 9));
+  gl.uniform3fv(PU.u_t, world.t);
+  gl.uniform2f(PU.u_focal, f, f);
+  gl.uniform2f(PU.u_size, w, h);
+  gl.bindVertexArray(planeVao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, planeBuf);
+  for (const p of planes) {
+    if (p.hull.length < 3) continue;
+    const cx = p.hull.reduce((a, q) => a + q[0], 0) / p.hull.length, cy = p.hull.reduce((a, q) => a + q[1], 0) / p.hull.length;
+    const pts = [[cx, cy], ...p.hull, p.hull[0]].flatMap(([x, y]) => [x, y, p.z]);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pts), gl.DYNAMIC_DRAW);
+    gl.uniform1f(PU.u_alpha, 0.14);
+    gl.drawArrays(gl.TRIANGLE_FAN, 0, pts.length / 3);
+    gl.uniform1f(PU.u_alpha, 0.55);
+    gl.drawArrays(gl.LINE_STRIP, 1, pts.length / 3 - 1);
+  }
+  gl.useProgram(prog);
 }
 
 const floorVao = gl.createVertexArray();
@@ -565,6 +622,7 @@ function frame(now) {
   const arView = ar.on && scene ? ar.view(scene.stats, w, canvas.clientWidth, canvas.clientHeight) : null;
   if (arView) {
     const f = arView.focal;
+    if (arView.planes) drawPlanes(arView.world, arView.planes, f, w, h);
     if (arView.reticle) drawFloor(arView.world, arView.reticle, arView.reticleRadius, 0, f, f, w, h);
     if (arView.shadow) drawFloor(arView.world, arView.shadow.center, arView.shadow.radius, 1, f, f, w, h);
     const st = ar.trackState();
@@ -575,9 +633,10 @@ function frame(now) {
            : st === "rotation" ? "Drag to turn it · pinch to resize · tap the floor to move it"
            : "Lost the floor: point the phone at it and move slowly");
     } else {
-      arHint(!arView.reticle ? "Point the phone at the floor"
+      arHint(!arView.reticle ? "Point the phone at the floor or a table"
            : st === "searching" ? "Tap to put it on the floor · finding floor texture…"
-           : "Tap to put it on the floor");
+           : arView.reticleOnTable ? "Tap to put it on the table"
+           : "Tap to put it on the floor · move around a table to find it");
     }
   } else if (ar.on) {
     arHint(scene ? "Waiting for the motion sensors…" : "Loading the scene…");

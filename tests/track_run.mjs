@@ -9,6 +9,8 @@ const frames = fs.readFileSync(framesPath);
 const { w, h, f, n } = meta;
 const tracker = await FloorTracker.create(fs.readFileSync(wasmPath));
 Object.assign(tracker.opts, meta.options || {});
+tracker.debug = !!process.env.TRACK_DEBUG;
+if (process.env.TRI_WEIGHT) tracker.opts.triWeight = +process.env.TRI_WEIGHT;
 const rgba = new Uint8Array(4 * w * h);
 const out = [];
 for (let k = 0; k < n; k++) {
@@ -19,6 +21,7 @@ for (let k = 0; k < n; k++) {
   }
   const r = tracker.frame(rgba, w, h, f, meta.times[k], meta.gyro[k], meta.height);
   out.push({ state: r.state, C: r.C, T: r.T, Craw: r.Craw, Traw: r.Traw, points: r.points, inliers: r.inliers,
-             ms: r.ms, lag: r.lag, followed: r.followed, fix: r.shiftFix, relocs: r.relocs, verified: r.verified, match: r.match });
+             ms: r.ms, lag: r.lag, followed: r.followed, fix: r.shiftFix, relocs: r.relocs, verified: r.verified, match: r.match,
+             planes: r.planes && r.planes.length ? r.planes : undefined, points3d: r.points3d });
 }
 fs.writeFileSync(outPath, JSON.stringify(out));

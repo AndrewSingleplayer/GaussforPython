@@ -27,12 +27,15 @@
 // lit a little by the floor's colour near it (viewer.js).
 const LIGHT_REF = 0.42;          // mean brightness (0-1) of a normally exposed camera frame
 
+import { insideHull } from "./tracker.mjs";
+
 const D2R = Math.PI / 180;
 // iPhone main (wide) camera: 26 mm equivalent focal length -> about 67 degrees across the long
 // side of the image. Safari's getUserMedia uses this camera for facingMode "environment".
 const FOV_LONG = 67 * D2R;
 const PHONE_HEIGHT = 1.35;       // metres from the floor to a phone held in front of you
-const SCENE_HEIGHT = 0.7;        // metres: how tall a scene stands when placed (pinch changes it)
+const SCENE_HEIGHT = 0.7;        // metres: how tall a scene stands when placed on the floor
+const TABLE_HEIGHT = 0.3;        // and on a table (pinch changes both)
 const TRACK_LONG = 360;          // long side of the image the floor tracker works on, pixels
 
 function mul(a, b) {               // 3x3, row-major
@@ -298,12 +301,38 @@ export class LookAroundAR {
     return this.track ? this.track.T : [0, 0, 0];
   }
 
-  // Where the ray through canvas pixel (x, y) meets the floor, or null.
+  // Surfaces the tracker found above the floor (tables): [{ z, hull }].
+  planes() {
+    return (this.track && this.track.planes) || [];
+  }
+
+  // Where a camera ray meets a surface: the nearest table it falls on, else the floor.
+  // Returns { P, table } or null.
+  surfaceHit(C, dirCam, T, maxDist = 8) {
+    const d = mulv(C, dirCam);
+    let best = null, bestS = Infinity;
+    for (const p of this.planes()) {
+      if (d[2] > -0.05 || p.z > T[2] - 0.1) continue;
+      const s = (p.z - T[2]) / d[2];
+      const X = [T[0] + s * d[0], T[1] + s * d[1], p.z];
+      if (s > 0 && s < bestS && insideHull(p.hull, X[0], X[1], 0.03)) { best = X; bestS = s; }
+    }
+    if (best) return { P: best, table: true };
+    const P = floorHit(C, dirCam, this.height, maxDist, T);
+    return P ? { P, table: false } : null;
+  }
+
+  dirAt(x, y, w, h, f) {
+    const len = Math.hypot((x - w / 2) / f, (y - h / 2) / f, 1);
+    return [(x - w / 2) / f / len, (y - h / 2) / f / len, 1 / len];
+  }
+
+  // Where the ray through canvas pixel (x, y) meets a surface (a table or the floor), or null.
   floorAt(x, y, w, h, f, maxDist = 8) {
     const C = this.camera();
     if (!C) return null;
-    const len = Math.hypot((x - w / 2) / f, (y - h / 2) / f, 1);
-    return floorHit(C, [(x - w / 2) / f / len, (y - h / 2) / f / len, 1 / len], this.height, maxDist, this.position());
+    const hit = this.surfaceHit(C, this.dirAt(x, y, w, h, f), this.position(), maxDist);
+    return hit && hit.P;
   }
 
   // Put the scene on the floor: the first time on the ring (the middle of the screen), wherever the
@@ -313,6 +342,7 @@ export class LookAroundAR {
     const P = this.floorAt(x, y, w, h, f);
     if (!P) return false;
     const T = this.position();
+    this.onTable = P[2] > -this.height + 0.1;
     this.placed = P;
     this.S = standOnFloor(P, header.front, 0, T);
     this.turn = 0;
@@ -323,7 +353,9 @@ export class LookAroundAR {
   // by as much as the floor under the fingers did.
   slide(x0, y0, x1, y1, w, h, f) {
     if (!this.placed) return;
-    const a = this.floorAt(x0, y0, w, h, f, 30), b = this.floorAt(x1, y1, w, h, f, 30);
+    const C = this.camera(), T = this.position(), z = this.placed[2];
+    const on = (x, y) => floorHit(C, this.dirAt(x, y, w, h, f), -z, 30, T);    // the surface it stands on
+    const a = on(x0, y0), b = on(x1, y1);
     if (!a || !b) return;
     this.placed = [this.placed[0] + b[0] - a[0], this.placed[1] + b[1] - a[1], this.placed[2]];
   }
@@ -338,7 +370,7 @@ export class LookAroundAR {
 
   // Scale from scene units to metres.
   scale(stats) {
-    return this.zoom * SCENE_HEIGHT / Math.max(1e-6, stats.top - stats.ground);
+    return this.zoom * (this.onTable ? TABLE_HEIGHT : SCENE_HEIGHT) / Math.max(1e-6, stats.top - stats.ground);
   }
 
   // What to draw this frame:
@@ -353,12 +385,18 @@ export class LookAroundAR {
     const f = this.focal(canvasW, cssW, cssH);
     const W2C = transpose(C);
     const out = { focal: f, world: { rows: W2C, t: mulv(W2C, T).map((v) => -v) }, reticle: null };
+    if (!this.placed) {
+      const hit = this.surfaceHit(C, [0, 0, 1], T);
+      this.onTable = !!(hit && hit.table);             // the ring shows the size it will have there
+    }
     const s = this.scale(stats);
     const footprint = 1.1 * s * stats.radius;          // radius of the floor the scene covers
     this.footprint = footprint;
     if (!this.placed) {
-      out.reticle = floorHit(C, [0, 0, 1], this.height, 8, T);
+      out.reticle = hit && hit.P;
+      out.reticleOnTable = !!(hit && hit.table);
       out.reticleRadius = Math.max(0.1, Math.min(0.6, footprint));
+      out.planes = this.planes();
       return out;
     }
     const S = mul(rotZ(this.turn), this.S);
