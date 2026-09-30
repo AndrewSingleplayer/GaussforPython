@@ -17,6 +17,7 @@ from .targets import GROUPS, TARGETS, Toolchain, expand_targets, host_target, ta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STD_DIR = os.path.join(HERE, "std")
+LIB_DIR = os.path.join(HERE, "lib")          # libraries found by `import "name.ha"` from any file
 RUNTIME_DIR = os.path.join(os.path.dirname(HERE), "runtime")
 
 
@@ -35,14 +36,24 @@ def load_program(path):
                 text = f.read()
         except OSError as e:
             raise HappError(f"can't read {p}: {e.strerror}")
-        m = parse(text, os.path.relpath(p) if not is_std else f"std/{os.path.basename(p)}")
+        if is_std:
+            shown = f"std/{os.path.basename(p)}"
+        elif rp.startswith(os.path.realpath(LIB_DIR) + os.sep):
+            shown = f"lib/{os.path.relpath(rp, LIB_DIR)}"
+        else:
+            shown = os.path.relpath(p)
+        m = parse(text, shown)
         m.is_std = is_std
         modules.append(m)
         for it in m.items:
             if isinstance(it, A.Import):
                 target = os.path.join(os.path.dirname(p), it.path)
                 if not os.path.exists(target):
-                    raise HappError(f"import not found: {it.path}", it.loc)
+                    target = os.path.join(LIB_DIR, it.path)       # a library that comes with HA++
+                if not os.path.exists(target):
+                    libs = sorted(n for n in os.listdir(LIB_DIR) if n.endswith(".ha"))
+                    raise HappError(f"import not found: {it.path}", it.loc,
+                                    f"libraries that come with HA++: {', '.join(libs)}")
                 load(target, is_std)
 
     load(path)

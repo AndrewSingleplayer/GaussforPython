@@ -18,10 +18,11 @@ kernels. Order does not matter.
 10. [GPU kernels](#gpu-kernels)
 11. [Built-in functions](#built-in-functions)
 12. [Standard library](#standard-library-happstdmathha)
-13. [Attributes](#attributes)
-14. [Memory layout](#memory-layout)
-15. [CPU vs GPU differences](#cpu-vs-gpu-differences)
-16. [Imports and names](#imports-and-names)
+13. [Memory allocators](#memory-allocators-happlibmemha)
+14. [Attributes](#attributes)
+15. [Memory layout](#memory-layout)
+16. [CPU vs GPU differences](#cpu-vs-gpu-differences)
+17. [Imports and names](#imports-and-names)
 
 ## Types
 
@@ -111,8 +112,16 @@ export fn f(gs: *Gaussian, n: i64) {
     let p = &arr[2];              // address of a 'var' (or of an element / field)
     let bytes = gs as *u8;        // pointer casts
     let addr = gs as u64;
+    let none = 0 as *Gaussian;    // the null pointer
+    if gs != none && gs < second { ... }       // pointers of the same type compare (CPU only)
+    let n = size_of(Gaussian);    // 56: bytes, known at compile time (align_of gives the alignment)
 }
 ```
+
+`size_of(T)` and `align_of(T)` work for every type, including arrays and
+structs defined later in the file. They are integer constants that adapt to
+their context like a literal: `let n: u64 = size_of(T) * count` needs no
+cast, and `const BYTES = size_of(T);` and `var raw: [size_of(T)]u8;` work.
 
 ## Vectors and matrices
 
@@ -138,7 +147,7 @@ From lowest to highest precedence:
 |---|---|
 | `\|\|` | short-circuit |
 | `&&` | short-circuit |
-| `== != < > <= >=` | can't be chained (`a < b < c` is an error) |
+| `== != < > <= >=` | can't be chained (`a < b < c` is an error); also pointers of the same type, on the CPU |
 | `\|` | bitwise (bools too) |
 | `^` | bitwise xor |
 | `&` | bitwise and |
@@ -173,7 +182,8 @@ Conversions are only ever explicit, with `x as T`:
   - Wider → narrower integers wrap.
 - **bool → integer:** allowed. For the other direction, write `x != 0`.
 - **vector ↔ vector:** same length, converted lane by lane: `vec3 as ivec3`.
-- **pointers:** `*T ↔ *U`, and `*T ↔ u64/i64`.
+- **pointers:** `*T ↔ *U`, and `*T ↔ u64/i64`. An integer literal becomes
+  an address: `0 as *T` is the null pointer.
 - **raw bits:** `f32_bits(x)`, `f32_from_bits(u)`, plus the same for f16/f64.
 
 ## Control flow
@@ -241,6 +251,7 @@ function, HA++ uses yours instead.
 | Geometry | `dot cross length distance normalize transpose` |
 | Bits | `popcount clz ctz f32_bits f32_from_bits f16_bits f16_from_bits f64_bits f64_from_bits` |
 | Packing | `pack_half2(vec2) -> u32`, `unpack_half2(u32) -> vec2` |
+| Layout | `size_of(T)`, `align_of(T)`: compile-time integers (see [pointers](#structs-arrays-pointers)) |
 | GPU | `barrier atomic_add atomic_min atomic_max atomic_exchange subgroup_*` |
 | Debug | `print(a, b, …)`: prints in `happ run`; ignored in libraries (with a build note) |
 
@@ -260,6 +271,55 @@ These are always available:
   (RGBA8).
 
 If you define a function or constant with the same name, yours is used.
+
+## Memory allocators (`happ/lib/mem.ha`)
+
+HA++ has no heap of its own. The host app gives an allocator one block of
+memory, and `import "mem.ha";` provides three ways to carve it up. None of
+them calls the operating system. Every function has a small, fixed
+worst-case cost, so it is safe inside a frame loop.
+
+| Allocator | Use it for | Cost |
+|---|---|---|
+| `Arena` | per-frame scratch memory, freed all at once | a few instructions; no header per allocation |
+| `Pool` | many objects of one size | O(1) alloc/free; starts in constant time |
+| `Tlsf` | mixed sizes freed in any order (a general `malloc`) | O(1) malloc/free/realloc; 16-byte aligned; 16 bytes per block |
+
+```rust
+import "mem.ha";
+
+export fn frame(scratch: *u8, bytes: u64) {
+    var a: Arena;
+    arena_init(&a, scratch, bytes);
+    let keys = arena_alloc(&a, 4 * 1000, 16) as *u32;    // null (0 as *u32) if it doesn't fit
+    ...
+    arena_reset(&a);                                      // everything freed at once
+}
+
+export fn make_heap(mem: *u8, bytes: u64) -> *Tlsf {
+    return tlsf_create(mem, bytes);         // the control block lives at the start of `mem`
+}
+export fn heap_alloc(t: *Tlsf, n: u64) -> *u8 { return tlsf_malloc(t, n); }
+export fn heap_free(t: *Tlsf, p: *u8) { tlsf_free(t, p); }
+```
+
+| Functions | |
+|---|---|
+| Arena | `arena_init(a, mem, size)`, `arena_alloc(a, size, align)`, `arena_mark(a)`, `arena_reset_to(a, mark)`, `arena_reset(a)`; `a.peak` is the most memory it ever held |
+| Pool | `pool_init(p, mem, bytes, block, align) -> count`, `pool_alloc(p)`, `pool_free(p, ptr)`, `pool_owns(p, ptr)`, `pool_reset(p)` |
+| TLSF | `tlsf_init(t, mem, bytes)` or `tlsf_create(mem, bytes)`, `tlsf_add_pool`, `tlsf_malloc`, `tlsf_free`, `tlsf_realloc`, `tlsf_block_size(ptr)`, `tlsf_largest_free(t)`, `tlsf_check(t)` (0 = all invariants hold) |
+
+TLSF is the Two-Level Segregated Fit allocator from real-time systems
+(Masmano et al., 2004), laid out like Matthew Conte's C version. Free blocks
+sit in 24 × 32 size-class lists with two bitmaps over them, so finding a
+block that fits takes two count-trailing-zeros instructions instead of a
+search. A freed block merges with its free neighbours right away. The
+allocators are not thread-safe: give each thread its own.
+
+`tests/test_alloc.py` checks them with randomized runs against a model
+(overlap, alignment, contents kept, realloc copies, invariants after every
+operation). `tests/mutate_alloc.py` plants 20 typical allocator bugs and
+checks that the tests catch every one.
 
 ## Attributes
 
@@ -306,6 +366,7 @@ struct `a_b` field `c` and struct `a` field `b_c`, are a build error.
 
 ```rust
 import "common.ha";     // path relative to this file; everything shares one namespace
+import "mem.ha";        // not next to this file: a library that comes with HA++ (happ/lib/)
 ```
 
 A name can't be used twice. User definitions replace std-library definitions

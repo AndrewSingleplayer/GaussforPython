@@ -184,6 +184,15 @@ class IntLit(Expr):
         self.value, self.loc, self.ty = value, loc, None
 
 
+class SizeOf(IntLit):
+    """size_of(T) / align_of(T): an integer literal whose value the checker fills in from T's layout."""
+    __slots__ = ("which", "type")
+
+    def __init__(self, which, type_, loc):
+        super().__init__(None, loc)
+        self.which, self.type = which, type_
+
+
 class FloatLit(Expr):
     __slots__ = ("value",)
 

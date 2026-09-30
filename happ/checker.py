@@ -29,7 +29,7 @@ SUBGROUP = {"subgroup_add", "subgroup_exclusive_add", "subgroup_lane", "subgroup
 BUILTIN_NAMES = (FLOAT_UNARY | FLOAT_BINARY | set(BIT_FUNCS) | INT_UNARY | ATOMICS | SUBGROUP |
                  {"abs", "sign", "min", "max", "clamp", "mix", "smoothstep", "fma", "dot",
                   "cross", "length", "distance", "normalize", "transpose", "select", "print",
-                  "barrier", "pack_half2", "unpack_half2"})
+                  "barrier", "pack_half2", "unpack_half2", "size_of", "align_of"})
 KERNEL_VARS = {"global_id", "local_id", "group_id", "num_groups", "group_size"}
 
 # std library function that implements each builtin on CPUs (f32 versions)
@@ -101,6 +101,8 @@ class Checker:
         self.structs = {}
         self.const_nodes = {}
         self.const_state = {}
+        self.struct_state = {}
+        self.layout_ready = set()     # structs whose by-value contents are all resolved (for size_of)
         self.scopes = []
         self.fn = None
         self.loops = 0
@@ -175,6 +177,13 @@ class Checker:
         raise AssertionError(te)
 
     def resolve_struct(self, st, node):
+        state = self.struct_state.get(st.name)
+        if state == "done":
+            return
+        if state == "busy":
+            raise HappError(f"the layout of struct '{st.name}' depends on itself (through size_of/align_of)",
+                            node.loc)
+        self.struct_state[st.name] = "busy"
         seen = set()
         self.check_foreign_name(st.name, node.loc, "struct name")
         for fname, fte, floc in node.fields:
@@ -189,6 +198,29 @@ class Checker:
             st.fields.append((fname, ft))
         if not st.fields:
             raise HappError(f"struct '{st.name}' has no fields", node.loc)
+        self.struct_state[st.name] = "done"
+
+    def ensure_layout(self, ty, path=()):
+        """Resolve every struct that `ty` holds by value, so its size can be computed already."""
+        while ty.is_array:
+            ty = ty.elem
+        if not ty.is_struct or ty.name in self.layout_ready:
+            return
+        if ty.name in path:
+            raise HappError(f"struct '{ty.name}' contains itself; use a pointer (*{ty.name})", ty.loc)
+        self.resolve_struct(ty, self.structs[ty.name][1])
+        for _, ft in ty.fields:
+            self.ensure_layout(ft, path + (ty.name,))
+        self.layout_ready.add(ty.name)
+
+    def sizeof_value(self, e):
+        """Value of size_of(T) / align_of(T), computed once from T's C layout."""
+        if e.value is None:
+            ty = self.resolve_type(e.type)
+            self.ensure_layout(ty)
+            size, align = T.size_align(ty)
+            e.value = size if e.which == "size_of" else align
+        return e.value
 
     def order_structs(self):
         state = {}
@@ -319,6 +351,8 @@ class Checker:
 
         'int'/'float' are untyped values (exact), which take a type from where they are used.
         `expected` is the declared type: literal operands then take it, exactly as at run time."""
+        if isinstance(e, A.SizeOf):
+            return self.sizeof_value(e), "int"
         if isinstance(e, A.IntLit):
             return e.value, "int"
         if isinstance(e, A.FloatLit):
@@ -777,6 +811,8 @@ class Checker:
 
     def literal_magnitude(self, e):
         """Largest integer literal in an untyped expression (to pick i32 or i64 when nothing else decides)."""
+        if isinstance(e, A.SizeOf):
+            return self.sizeof_value(e)
         if isinstance(e, A.IntLit):
             return abs(e.value)
         if isinstance(e, A.Name):
@@ -855,6 +891,8 @@ class Checker:
 
     def _check(self, e, expected):
         if isinstance(e, A.IntLit):
+            if isinstance(e, A.SizeOf):
+                self.sizeof_value(e)
             return self.literal_type("int", e.value, expected, e.loc)
         if isinstance(e, A.FloatLit):
             return self.literal_type("float", e.value, expected, e.loc)
@@ -894,7 +932,7 @@ class Checker:
                 if lt != rt:
                     raise HappError(f"can't compare {lt} with {rt}", e.loc,
                                     "convert one side with 'as'")
-                if not (lt.is_numeric or (lt.is_bool and e.op in ("==", "!="))):
+                if not (lt.is_numeric or lt.is_ptr or (lt.is_bool and e.op in ("==", "!="))):
                     raise HappError(f"can't compare values of type {lt} with '{e.op}'", e.loc)
                 return T.BOOL
             if e.op in ("<<", ">>"):
@@ -918,6 +956,8 @@ class Checker:
             elif k == "int" and target.is_numeric:
                 # like C/Rust: compute as a normal integer, then convert (-1 as u32 == 4294967295)
                 src = self.check(e.expr, self.default_int(e.expr))
+            elif k == "int" and target.is_ptr:
+                src = self.check(e.expr, T.U64)             # 0 as *T is the null pointer
             else:
                 src = self.check(e.expr)
             self.check_cast(src, target, e.loc)
@@ -1455,6 +1495,8 @@ class Checker:
             elif isinstance(e, A.Binary):
                 if e.op in ("+", "-") and (e.left.ty.is_ptr or e.right.ty.is_ptr):
                     bad(e, "pointer arithmetic isn't available")
+                if e.left.ty is not None and e.left.ty.is_ptr:
+                    bad(e, "pointers can't be compared on the GPU")
                 expr(e.left)
                 expr(e.right)
             elif isinstance(e, A.Cast):

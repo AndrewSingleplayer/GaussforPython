@@ -97,6 +97,13 @@ class FrontEnd(unittest.TestCase):
         ("struct A { b: B } struct B { a: A }", "contains itself"),
         ("fn f() { let x = 1.0u; }", "after number"),
         ("fn f(a: f32) -> f64 { return exp(a as f64); }", "not available for f64"),
+        ("kernel k(a: *u32, b: *u32) { if a == b { a[0] = 1; } }", "can't be compared on the GPU"),
+        ("fn f(a: *u32, b: *u8) -> bool { return a == b; }", "can't compare *u32 with *u8"),
+        ("struct A { x: [size_of(A)]u8 }", "depends on itself"),
+        ("struct P { q: Q } struct Q { p: P } struct R { x: [size_of(P)]u8 }", "contains itself"),
+        ("fn size_of(x: i32) -> i32 { return x; }", "built-in name"),
+        ("fn f() -> i64 { return size_of(Nope); }", "unknown type 'Nope'"),
+        ("fn f() -> *u8 { return -1 as *u8; }", "doesn't fit in u64"),
     ]
 
     def test_error_messages(self):
@@ -144,6 +151,34 @@ fn main() -> i32 {
         r = subprocess.run([sys.executable, "-m", "happ", "run", path], capture_output=True, text=True, cwd=ROOT)
         self.assertEqual(r.returncode, 3, r.stderr)
         self.assertEqual(r.stdout.strip(), "hi 42 (9, 2, 8) 0.5 true")
+
+    def test_pointers_and_sizes(self):
+        path = self.write("ptr.ha", """
+struct Node { next: *Node, size: u64, tag: u32 }
+struct Later { a: [size_of(Node)]u8, b: Tail }
+struct Tail { v: vec3, h: f16 }
+struct Outer { x: [size_of(Mid)]u8 }
+struct Mid { c: Inner, d: [2]Inner }
+struct Inner { v: vec4 }
+const NODE = size_of(Node);
+fn main() {
+    let null = 0 as *Node;
+    var a: Node;
+    var b: Node;
+    let pa = &a;
+    let pb = &b;
+    let lo = select(pa < pb, pa, pb);
+    let hi = select(pa < pb, pb, pa);
+    print(pa == null, pa != null, pa == pa, pa == pb, lo < hi, hi >= lo, lo > hi);
+    let n: u64 = size_of(Node) * 3;
+    print(NODE, n, align_of(Node), size_of(Later), size_of(Tail), size_of([3]vec3), size_of(*u8));
+    print(size_of(Outer), size_of(Mid));
+}
+""")
+        r = subprocess.run([sys.executable, "-m", "happ", "run", path], capture_output=True, text=True, cwd=ROOT)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.split("\n")[:3], ["false true true false true true false",
+                                                    "24 72 8 40 16 36 8", "48 48"])
 
     def test_features_native(self):
         import arm64_run
@@ -237,6 +272,27 @@ export fn norm(v: *V) -> f32 { return length(v.p) + (v.h as f32); }
         # the generated C header compiles and agrees with HA++ layout
         cfile = self.write("use.c", '#include "lib.h"\nint main(void) { V v = {{1,2,3}, 0}; return (int)norm(&v); }\n')
         subprocess.run([TC.find("clang"), "-fsyntax-only", "-I", os.path.join(out, "include"), cfile], check=True)
+
+    def test_header_with_linked_structs(self):
+        # a struct pointing to itself, and to a struct defined after it, must give a valid C header
+        path = self.write("links.ha", """
+struct Item { next: *Item, owner: *List, v: f32 }
+struct List { head: *Item, count: u32 }
+export fn total(l: *List) -> f32 {
+    var s = 0.0;
+    var it = l.head;
+    while it as u64 != 0 { s += it.v; it = it.next; }
+    return s;
+}
+""")
+        out = os.path.join(self.tmp, "build")
+        build(path, ["linux-x64"], out, quiet=True)
+        cfile = self.write("use.c", '#include "links.h"\nint main(void) { Item a = {0, 0, 2.0f}; List l = {&a, 1}; '
+                                    'a.owner = &l; return (int)total(&l); }\n')
+        for compiler, std in (("clang", "-std=c11"), ("clang++", "-std=c++17")):
+            if have(compiler):
+                subprocess.run([TC.find(compiler) or compiler, std, "-x", "c" if compiler == "clang" else "c++",
+                                "-fsyntax-only", "-I", os.path.join(out, "include"), cfile], check=True)
 
     @unittest.skipUnless(have("qemu-aarch64", "ld.lld"), "needs qemu-aarch64 and ld.lld")
     def test_arm64_matches_x86_64(self):

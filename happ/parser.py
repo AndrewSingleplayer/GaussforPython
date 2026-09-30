@@ -329,6 +329,13 @@ class Parser:
         if t.kind == "kw" and t.value in ("true", "false"):
             self.advance()
             return A.BoolLit(t.value == "true", t.loc)
+        if t.kind == "ident" and t.value in ("size_of", "align_of") and self.peek().kind == "op" \
+                and self.peek().value == "(":
+            self.advance()
+            self.advance()
+            ty = self.parse_type()
+            self.expect_op(")")
+            return A.SizeOf(t.value, ty, t.loc)
         if t.kind == "ident":
             self.advance()
             if self.accept("op", "("):

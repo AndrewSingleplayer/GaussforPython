@@ -84,12 +84,17 @@ class CHeader:
     def render(self, name, src, spirv_kernels, has_metal, gpu_runtime):
         prog = self.prog
         body = []
+        # declare every struct name first: a field can point to its own struct or to one defined later
+        for st in prog.structs:
+            body.append(f"typedef struct {st.name} {st.name};")
+        if prog.structs:
+            body.append("")
         for st in prog.structs:
             size, _ = T.size_align(st)
-            body.append(f"typedef struct {st.name} {{")
+            body.append(f"struct {st.name} {{")
             for fname, ft in st.fields:
                 body.append(f"    {self.field(fname, ft)};")
-            body.append(f"}} {st.name};")
+            body.append("};")
             body.append(f"HA_ASSERT_SIZE({st.name}, {size});")
             body.append("")
         if prog.exports:

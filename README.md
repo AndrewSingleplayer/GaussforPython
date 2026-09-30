@@ -85,6 +85,7 @@ kernel fade_gpu(s: *Splat, n: u32, k: f32) {
 |---|---|
 | `happ/` | the compiler: lexer, parser, type checker, LLVM backend, GPU backend (GLSL/Metal), bridges, build driver |
 | `happ/std/math.ha` | standard library written in HA++: exp/log/sin/cos/tanh/pow…, sigmoid/gelu, quaternions, color packing |
+| `happ/lib/mem.ha` | memory allocators in HA++ (`import "mem.ha";`): Arena, Pool and TLSF, an O(1) general-purpose allocator from real-time systems ([docs](docs/LANGUAGE.md#memory-allocators-happlibmemha)) |
 | `runtime/gpu/` | Vulkan GPU runtime in C. It compiles with plain clang (no SDK) and is linked into Android/Windows/Linux libraries |
 | `gaussian/` | Gaussian splat renderer for AR: the engine in HA++, hosts in Python (PC), Java (Android) and Swift, and a complete iPhone app built into `Splats.ipa` without a Mac ([gaussian/README.md](gaussian/README.md)) |
 | `examples/ai/nn.ha` | matmul, softmax, layer norm, GELU: a transformer MLP block on GPU and CPU |
@@ -119,11 +120,12 @@ Results of `python3 bench/bench.py` on the build server (x86-64, best of 7 runs)
 
 ## What was tested (and what was not)
 
-All of this runs in `python3 -m unittest discover -s tests` (22 tests):
+All of this runs in `python3 -m unittest discover -s tests` (31 tests):
 
 | Area | Status |
 |---|---|
 | Compiler errors, literals, name rules | ✅ tested |
+| Allocators (Arena, Pool, TLSF): randomized runs against a model, invariants checked after every operation; 20 of 20 planted bugs caught (`tests/mutate_alloc.py`) | ✅ tested |
 | **Differential fuzzing:** random programs run on x86-64, ARM64, Vulkan and Metal emulation vs an exact model (`tests/fuzz.py`; 120 programs, about 540,000 results, 0 mismatches) | ✅ tested |
 | CPU code on x86-64: language features, math accuracy (exp/log ≤ 2 ulp) | ✅ tested |
 | **ARM64 code**, the phones' CPU: 166 results under `qemu-aarch64` match x86-64 exactly | ✅ tested |
@@ -150,8 +152,9 @@ All of this runs in `python3 -m unittest discover -s tests` (22 tests):
   [docs/PLATFORMS.md](docs/PLATFORMS.md).
 - **GPU kernels are compute-only:** there are no vertex/fragment shaders. The
   splat renderer draws with a compute rasterizer, as the original 3DGS does.
-- **No generics, no heap allocation, no strings** beyond `print` in
-  `happ run`. Memory comes from the host app (buffers and arrays).
+- **No generics and no strings** beyond `print` in `happ run`. There is no
+  built-in heap: memory comes from the host app (buffers and arrays), and
+  `happ/lib/mem.ha` divides it up (Arena, Pool, TLSF).
 - **`f64` limits:** `exp`, `sin` and the other transcendental functions exist
   only for `f16`/`f32`. `pow` is fast but approximate (about 3e-6 relative).
 - **Out-of-range array and pointer access is not checked,** the same as in
