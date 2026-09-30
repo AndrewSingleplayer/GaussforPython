@@ -550,7 +550,15 @@ class GPU(TempDirCase):
         raw = R.synthetic_scene(1500, seed=3)
         pipe.upload(raw)
         packed = pipe.view("splats", np.uint32, len(raw) * 8).reshape(-1, 8).copy()
-        np.testing.assert_array_equal(packed, ref.pack(raw))
+        want = ref.pack(raw)
+        np.testing.assert_array_equal(packed[:, :4], want[:, :4])          # position and colour: exact
+
+        def covariance(p):         # f16 pairs times the f32 scale; exp() may differ by an ulp from NumPy's
+            h = np.ascontiguousarray(p[:, 4:7]).view(np.float16).astype(np.float64)
+            return h * p[:, 7:8].copy().view(np.float32).astype(np.float64)
+        got_cov, want_cov = covariance(packed), covariance(want)
+        scale = np.abs(want_cov).max(1, keepdims=True)
+        self.assertLess(np.max(np.abs(got_cov - want_cov) / scale), 2e-3)
         w, h = 200, 136
         cam = R.look_at([0, 2.0, -3.0], [0, 0, 0], w, h)
         img, total = pipe.render(cam, w, h, background=(8, 10, 22))

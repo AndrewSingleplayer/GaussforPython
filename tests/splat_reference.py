@@ -1,4 +1,4 @@
-"""Independent NumPy implementation of gaussian/splat.ha (for testing the GPU pipeline)."""
+"""Independent NumPy implementation of gaussian/splat.ha v2 (for testing the GPU pipeline)."""
 
 import numpy as np
 
@@ -46,7 +46,9 @@ def pack(raw):
     r = quat_to_mat3(raw[:, 6:10])
     s = np.exp(raw[:, 3:6])
     m = r * s[:, None, :]
-    cov = m @ np.transpose(m, (0, 2, 1))
+    full = m @ np.transpose(m, (0, 2, 1))
+    scale = np.maximum(np.maximum(full[:, 0, 0], full[:, 1, 1]), np.maximum(full[:, 2, 2], F(1e-30)))
+    cov = full * (F(1) / scale)[:, None, None]
     rgb = np.clip(raw[:, 11:14] * SH_C0 + F(0.5), 0, 1)
     color = pack_unorm4(np.concatenate([rgb, sigmoid(raw[:, 10:11])], 1))
     out = np.zeros((len(raw), 8), np.uint32)
@@ -55,6 +57,7 @@ def pack(raw):
     out[:, 4] = half_pair(cov[:, 0, 0], cov[:, 1, 0])
     out[:, 5] = half_pair(cov[:, 2, 0], cov[:, 1, 1])
     out[:, 6] = half_pair(cov[:, 2, 1], cov[:, 2, 2])
+    out[:, 7] = scale.astype(np.float32).view(np.uint32)
     return out
 
 
@@ -68,6 +71,7 @@ def preprocess(packed, cam, width, height):
     xz, yy = unpack_half2(packed[:, 5])
     yz, zz = unpack_half2(packed[:, 6])
     sigma = np.stack([np.stack([xx, xy, xz], 1), np.stack([xy, yy, yz], 1), np.stack([xz, yz, zz], 1)], 1)
+    sigma = sigma * packed[:, 7].view(np.float32)[:, None, None]
     w = view[:3, :3]
     m = w @ sigma @ w.T
     focal = np.array([cam["fx"], cam["fy"]], np.float32)
@@ -86,13 +90,17 @@ def preprocess(packed, cam, width, height):
     c = (j1 * mj1).sum(1) + F(0.3)
     det = a * c - b * b
     ok &= det > 0
-    mid = F(0.5) * (a + c)
-    lam = mid + np.sqrt(np.maximum(F(0.1), mid * mid - det))
-    radius = np.ceil(F(3) * np.sqrt(lam))
+    # v2: the bounding box of the ellipse where opacity * exp(-q/2) >= 1/255
+    opacity = ((packed[:, 3] >> 24).astype(np.float32)) * F(0.00392156862745098)
+    cut = F(2) * np.log(np.maximum(F(255) * opacity, F(1))).astype(np.float32)
+    ok &= cut > 0
+    with np.errstate(invalid="ignore"):
+        half = np.sqrt(cut[:, None] * np.stack([a, c], 1))
     center = np.stack([focal[0] * pc[:, 0] / z + F(cam["cx"]), focal[1] * pc[:, 1] / z + F(cam["cy"])], 1)
     tiles = np.array([tiles_x, tiles_y], np.float32)
-    lo = np.clip(np.floor((center - radius[:, None]) / F(16)), 0, tiles).astype(np.uint32)
-    hi = np.clip(np.floor((center + radius[:, None] + F(15)) / F(16)), 0, tiles).astype(np.uint32)
+    with np.errstate(invalid="ignore"):
+        lo = np.clip(np.floor((center - half) / F(16)), 0, tiles).astype(np.uint32)
+        hi = np.clip(np.floor((center + half) / F(16)) + F(1), 0, tiles).astype(np.uint32)
     count = (hi[:, 0] - lo[:, 0]) * (hi[:, 1] - lo[:, 1])
     ok &= count > 0
     with np.errstate(all="ignore"):

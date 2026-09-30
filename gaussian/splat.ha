@@ -10,8 +10,14 @@
 //
 // Loading (once): pack_splats() turns full-precision splats (as stored in .ply
 // files, ~240 bytes each with full SH) into 32-byte PackedSplats: position, color+opacity
-// as RGBA8, and the 3D covariance as six f16 values. That is the main memory
-// and bandwidth saving on phones.
+// as RGBA8, and the 3D covariance as six f16 values scaled by one f32. That is the main
+// memory and bandwidth saving on phones.
+//
+// v2 (research/02-speed.md): each splat covers only the tiles of the bounding box of the
+// ellipse where it adds at least 1/255 to a pixel (the same test render() applies per pixel),
+// instead of a 3-sigma square: 1.2-3x fewer (splat, tile) pairs to sort on real captures,
+// and no pixel changes. The covariance is stored divided by its largest variance, which keeps
+// f16 precise (raw f16 loses 78-93% of the splats of real captures, research/01-splat-math.md).
 //
 // Camera convention: camera space is x right, y down, z forward (like the
 // original 3DGS / OpenCV). ARKit/ARCore views are x right, y up, z backward:
@@ -35,8 +41,8 @@ struct GaussianRaw {
 struct PackedSplat {
     pos: vec3,
     color: u32,         // RGBA8: base color + opacity
-    cov: [3]u32,        // 3D covariance xx,xy | xz,yy | yz,zz as f16 pairs
-    pad: u32,
+    cov: [3]u32,        // 3D covariance / cov_scale: xx,xy | xz,yy | yz,zz as f16 pairs
+    cov_scale: f32,     // the largest variance of the splat
 }
 
 struct Camera {
@@ -71,7 +77,9 @@ fn covariance(log_scale: vec3, rot: vec4) -> mat3 {
 export fn pack_splats(raw: *GaussianRaw, out: *PackedSplat, n: i64) {
     for i in 0..n {
         let g = raw[i];
-        let cov = covariance(g.log_scale, g.rot);
+        let full = covariance(g.log_scale, g.rot);
+        let scale = max(max(full[0].x, full[1].y), max(full[2].z, 1.0e-30));
+        let cov = full * (1.0 / scale);
         let rgb = clamp(g.sh_dc * SH_C0 + 0.5, 0.0, 1.0);
         var p: PackedSplat;
         p.pos = g.pos;
@@ -79,6 +87,7 @@ export fn pack_splats(raw: *GaussianRaw, out: *PackedSplat, n: i64) {
         p.cov[0] = pack_half2(vec2(cov[0].x, cov[0].y));
         p.cov[1] = pack_half2(vec2(cov[0].z, cov[1].y));
         p.cov[2] = pack_half2(vec2(cov[1].z, cov[2].z));
+        p.cov_scale = scale;
         out[i] = p;
     }
 }
@@ -100,7 +109,7 @@ kernel preprocess(splats: *PackedSplat, cams: *Camera, projs: *Proj, counts: *u3
     let c0 = unpack_half2(s.cov[0]);
     let c1 = unpack_half2(s.cov[1]);
     let c2 = unpack_half2(s.cov[2]);
-    let sigma = mat3(vec3(c0.x, c0.y, c1.x), vec3(c0.y, c1.y, c2.x), vec3(c1.x, c2.x, c2.y));
+    let sigma = mat3(vec3(c0.x, c0.y, c1.x), vec3(c0.y, c1.y, c2.x), vec3(c1.x, c2.x, c2.y)) * s.cov_scale;
     let w = mat3(cam.view[0].xyz, cam.view[1].xyz, cam.view[2].xyz);
     let m = w * sigma * transpose(w);
     let lim = 1.3 * cam.size * 0.5 / cam.focal;
@@ -116,14 +125,18 @@ kernel preprocess(splats: *PackedSplat, cams: *Camera, projs: *Proj, counts: *u3
     let c = dot(j1, mj1) + 0.3;
     let det = a * c - b * b;
     if det <= 0.0 { return; }
-    let mid = 0.5 * (a + c);
-    let lambda = mid + sqrt(max(0.1, mid * mid - det));
-    let radius = ceil(3.0 * sqrt(lambda));
+    // render() skips a pixel where opacity * exp(-q/2) < 1/255 (q = d^T conic d), so the splat only
+    // reaches pixels inside the ellipse q <= cut. Its bounding box has half-widths sqrt(cut * a),
+    // sqrt(cut * c) (a, c: the diagonal of the 2D covariance).
+    let opacity = ((s.color >> 24) as f32) * 0.00392156862745098;
+    let cut = 2.0 * log(max(255.0 * opacity, 1.0));
+    if cut <= 0.0 { return; }
+    let half = sqrt(cut * vec2(a, c));
 
     let center = vec2(cam.focal.x * pc.x / pc.z + cam.center.x, cam.focal.y * pc.y / pc.z + cam.center.y);
     let tiles = vec2(cam.tiles_x as f32, cam.tiles_y as f32);
-    let lo = clamp(floor((center - radius) / 16.0), vec2(0.0), tiles);
-    let hi = clamp(floor((center + radius + 15.0) / 16.0), vec2(0.0), tiles);
+    let lo = clamp(floor((center - half) / 16.0), vec2(0.0), tiles);
+    let hi = clamp(floor((center + half) / 16.0) + 1.0, vec2(0.0), tiles);
     let rect = uvec4(lo.x as u32, lo.y as u32, hi.x as u32, hi.y as u32);
     let count = (rect.z - rect.x) * (rect.w - rect.y);
     if count == 0 { return; }
