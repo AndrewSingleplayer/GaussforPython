@@ -31,9 +31,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh api "repos/${{ github.repository }}/pages" --silent 2>/dev/null; then
+          if answer=$(gh api "repos/${{ github.repository }}/pages" 2>&1); then
+            echo "Pages is on: $(echo "$answer" | grep -o '"html_url":"[^"]*"')"
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           else
+            echo "GitHub answered: $answer"
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             echo "::notice title=GitHub Pages is off::Turn it on in Settings > Pages > Source: GitHub Actions, then run this workflow again (Actions > Web viewer > Run workflow)."
           fi
