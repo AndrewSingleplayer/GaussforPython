@@ -137,6 +137,8 @@ WIN_IMPORTS = ["LoadLibraryA", "GetProcAddress", "GetProcessHeap", "HeapAlloc", 
 def check_undefined(tc, objs, prog, tinfo, runtime=False):
     """Symbols the objects need from outside. Anything unexpected is a compiler bug."""
     allowed = {f.name for f in prog.externs}
+    if tinfo["kind"] == "wasm":
+        allowed |= {"__stack_pointer", "__indirect_function_table", "__heap_base", "__data_end"}
     if runtime:
         allowed |= RUNTIME_LIBC | {"__imp_" + n for n in WIN_IMPORTS}
     defined = set()
@@ -234,6 +236,12 @@ def link(tc, tinfo, objs, out_path, lib_name, undefined, workdir, runtime=False)
         if os.path.exists(out_path):
             os.remove(out_path)
         run_cmd([ar, "rcs", "--format=darwin", out_path] + list(objs), "llvm-ar")
+    elif kind == "wasm":
+        ld = tc.require("wasm-ld", "linking WebAssembly modules")
+        # exported HA++ functions have default visibility; everything else is internal or hidden
+        run_cmd([ld, "--no-entry", "--export-dynamic", "--gc-sections", "-O2", "--strip-debug",
+                 "-z", "stack-size=1048576", "--export=__heap_base", "--max-memory=2147483648"]
+                + list(objs) + ["-o", out_path], "wasm-ld")
     elif kind == "dll":
         user = [u for u in undefined if u not in RUNTIME_LIBC]
         if user:
@@ -252,6 +260,8 @@ def output_path(out_dir, tinfo, name):
     t = tinfo["name"]
     if tinfo["os"] == "android":
         return os.path.join(out_dir, "android", "jniLibs", tinfo["abi"], f"lib{name}.so")
+    if tinfo["kind"] == "wasm":
+        return os.path.join(out_dir, "web", f"{name}.wasm")
     if tinfo["kind"] == "static":
         return os.path.join(out_dir, t, f"lib{name}.a")
     if tinfo["kind"] == "dll":
@@ -355,11 +365,14 @@ def build(file, targets, out_dir, name=None, package=None, cls=None, cpu=None, s
     for tname in targets:
         tinfo = target_info(tname, cpu)
         apple = tinfo["os"] in ("ios", "macos")
+        web = tinfo["os"] == "web"
         blobs = dict(gpu_blobs)
         if apple:
             blobs = {"metal_source": metal_src.encode()} if metal_src is not None else {}
-        rt = use_runtime and not apple
-        jni = None if apple else (package, cls)
+        if web:
+            blobs = {}          # browsers get the CPU versions of the kernels (<kernel>_cpu)
+        rt = use_runtime and not apple and not web
+        jni = None if apple or web else (package, cls)
         gen = LLVMGen(prog, tinfo, mode="lib", jni=jni, lib_name=name, gpu_blobs=blobs,
                       strict_math=strict_math, f16_helpers=tinfo["f16_helpers"], gpu_runtime=rt)
         ir = gen.generate(lib_roots(prog))

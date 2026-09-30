@@ -5,7 +5,8 @@ Everything below starts from the same command. It runs on any computer
 
 ```sh
 happ build my.ha -t phones        # android-arm64, android-x64, ios-arm64, ios-sim-arm64, ios-sim-x64
-happ build my.ha -t all           # + windows-x64/arm64, macos-arm64/x64, linux-x64/arm64
+happ build my.ha -t all           # + windows-x64/arm64, macos-arm64/x64, linux-x64/arm64, web-wasm32
+happ build my.ha -t web           # WebAssembly for browsers, Safari on iPhone included
 ```
 
 The output goes to `build/`, next to the `.ha` file:
@@ -23,6 +24,7 @@ build/
   macos-arm64/libmy.a ...                Mac (static; also inside the xcframework)
   gpu/*.comp, *.spv, my.metal            generated GPU code (also embedded in the libraries)
   python/my.py                           Python bindings
+  web/my.wasm, web/my.mjs                WebAssembly + a JavaScript loader (browsers, Node)
 ```
 
 These options change names:
@@ -36,6 +38,7 @@ These options change names:
 | Python 3.9+ | the compiler itself | python.org / winget / brew / apt |
 | LLVM: `clang`, `ld.lld`, `lld-link`, `llvm-ar` | every target | Windows `winget install LLVM.LLVM` · macOS `brew install llvm lld` · Linux `apt install clang lld llvm` |
 | `glslangValidator` | GPU kernels → SPIR-V | Vulkan SDK (lunarg.com) · `apt install glslang-tools` · `brew install glslang` |
+| `wasm-ld` | the `web-wasm32` target | part of LLVM's lld (installed with the LLVM line above) |
 
 `happ build` needs nothing else. `happ run` links a normal program against
 your system's C library. On Windows that means installing Visual Studio Build
@@ -211,6 +214,41 @@ See `gaussian/apple/SplatRenderer.swift`.
 
 `happ build my.ha -t linux-x64` (or `linux-arm64`) produces `libmy.so` and
 Python bindings.
+
+## Web browsers and Safari on iPhone (WebAssembly)
+
+`happ build my.ha -t web` makes `build/web/my.wasm` and `build/web/my.mjs`.
+The module uses WebAssembly SIMD (128-bit vectors), bulk memory and
+saturating float-to-int conversion. Safari on iOS 16.4 or newer, Chrome,
+Firefox and Node 18+ support all three.
+
+```js
+import { load, SIZEOF } from "./my.mjs";
+const lib = await load(new URL("./my.wasm", import.meta.url));
+const n = 1000;
+const p = lib.alloc(4 * n);                 // bytes inside the module's memory
+lib.f32(p, n).set(myFloat32Array);          // copy data in
+lib.exports.process(p, BigInt(n));          // an `export fn process(data: *f32, n: i64)`
+const result = lib.f32(p, n);               // read results (take a new view after memory grows)
+```
+
+- **Types:** pointers are byte offsets (JS numbers). `i64`/`u64`
+  parameters and results are JS `BigInt`. All other numbers are JS numbers.
+  Prefer `u32`/`i32` counts in functions made for the web.
+- **Layout:** the same as on every other target. WebAssembly addresses are
+  4 bytes, but HA++ stores pointers inside structs and arrays as 8 bytes
+  there too. So `size_of`, the C header and `SIZEOF`/`OFFSETOF` in the JS
+  module all agree.
+- **Kernels:** a browser gets the CPU version of each kernel
+  (`<kernel>_cpu`). The GPU versions need WebGPU, which HA++ doesn't
+  generate yet.
+- **Math:** the same HA++ math library as elsewhere. WebAssembly has no
+  fused multiply-add, so `exp`, `tanh` etc. can differ from the ARM64/x86
+  result by an ulp. They stay within the same stated accuracy. The
+  differential fuzzer (`tests/fuzz.py`) runs every random program as
+  WebAssembly too.
+- **No threads:** shared memory in browsers needs cross-origin isolation
+  headers, so run long work in a Web Worker instead.
 
 ## Python (tools and AI experiments on a PC)
 

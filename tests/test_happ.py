@@ -192,7 +192,9 @@ fn main() {
         path = self.write("m.ha", "".join(
             f"export fn t_{f}(x: *f32, o: *f32, n: i64) {{ for i in 0..n {{ o[i] = {f}(x[i]); }} }}\n"
             for f in ("exp", "log", "sin", "cos", "tanh", "atan", "asin", "exp2", "log2")))
-        lib = ctypes.CDLL(build(path, ["linux-x64"], self.tmp, quiet=True, bridges=False)["linux-x64"])
+        targets = ["linux-x64"] + (["web-wasm32"] if have("node", "wasm-ld") else [])
+        produced = build(path, targets, self.tmp, quiet=True, bridges=False)
+        lib = ctypes.CDLL(produced["linux-x64"])
         rng = np.random.default_rng(1)
         cases = {"exp": (np.exp, rng.uniform(-80, 80, 200000), 2),
                  "log": (np.log, np.exp(rng.uniform(-80, 80, 200000)), 2),
@@ -203,18 +205,42 @@ fn main() {
                  "asin": (np.arcsin, rng.uniform(-1, 1, 200000), 3),
                  "exp2": (np.exp2, rng.uniform(-120, 120, 200000), 2),
                  "log2": (np.log2, np.exp(rng.uniform(-80, 80, 200000)), 2)}
+        wasm_out = {}
+        if "web-wasm32" in produced:        # the same functions as WebAssembly (browsers, Safari on iPhone)
+            for name, (_, x, _) in cases.items():
+                x.astype(np.float32).tofile(os.path.join(self.tmp, f"in_{name}.bin"))
+            js = self.write("math.mjs", f"""
+import fs from "node:fs";
+const {{ instance }} = await WebAssembly.instantiate(fs.readFileSync("{produced['web-wasm32']}"), {{ env: {{}} }});
+const e = instance.exports, mem = e.memory;
+for (const name of {list(cases)}) {{
+    const x = new Float32Array(fs.readFileSync("{self.tmp}/in_" + name + ".bin").buffer.slice(0));
+    const base = Math.ceil(Number(e.__heap_base.value) / 16) * 16, out = base + x.length * 4;
+    const need = out + x.length * 4;
+    if (need > mem.buffer.byteLength) mem.grow(Math.ceil((need - mem.buffer.byteLength) / 65536));
+    new Float32Array(mem.buffer, base, x.length).set(x);
+    e["t_" + name](base, out, BigInt(x.length));
+    fs.writeFileSync("{self.tmp}/out_" + name + ".bin", new Uint8Array(mem.buffer, out, x.length * 4));
+}}
+""")
+            subprocess.run(["node", js], check=True)
+            for name in cases:
+                wasm_out[name] = np.fromfile(os.path.join(self.tmp, f"out_{name}.bin"), np.float32)
         for name, (ref, x, tol) in cases.items():
-            with self.subTest(fn=name):
-                x = x.astype(np.float32)
-                o = np.empty_like(x)
-                f = getattr(lib, f"t_{name}")
-                f(P(x.ctypes.data), P(o.ctypes.data), I64(len(x)))
-                r = ref(x.astype(np.float64))
-                if tol < 1:   # absolute error (sin/cos near zeros)
-                    self.assertLess(np.abs(o - r).max(), tol)
-                else:         # ulp
-                    ulp = np.spacing(np.abs(r.astype(np.float32))).astype(np.float64)
-                    self.assertLessEqual((np.abs(o - r) / ulp).max(), tol)
+            x = x.astype(np.float32)
+            o = np.empty_like(x)
+            f = getattr(lib, f"t_{name}")
+            f(P(x.ctypes.data), P(o.ctypes.data), I64(len(x)))
+            r = ref(x.astype(np.float64))
+            for where, got in (("x86-64", o), ("wasm", wasm_out.get(name))):
+                if got is None:
+                    continue
+                with self.subTest(fn=name, target=where):
+                    if tol < 1:   # absolute error (sin/cos near zeros)
+                        self.assertLess(np.abs(got - r).max(), tol)
+                    else:         # ulp
+                        ulp = np.spacing(np.abs(r.astype(np.float32))).astype(np.float64)
+                        self.assertLessEqual((np.abs(got - r) / ulp).max(), tol)
 
     def test_fast_loops_vectorize(self):
         path = self.write("v.ha", "export fn f(x: *f32, n: i64) { for i in 0..n { x[i] = sigmoid(x[i]) * 2.0; } }")
@@ -247,6 +273,8 @@ export fn norm(v: *V) -> f32 { return length(v.p) + (v.h as f32); }
                     self.assertEqual(data[:4], b"\x7fELF")
                 elif t.startswith("windows"):
                     self.assertEqual(data[:2], b"MZ")
+                elif t.startswith("web"):
+                    self.assertEqual(data[:4], b"\x00asm")
                 else:
                     self.assertEqual(data[:8], b"!<arch>\n")
         if readelf:
@@ -293,6 +321,62 @@ export fn total(l: *List) -> f32 {
             if have(compiler):
                 subprocess.run([TC.find(compiler) or compiler, std, "-x", "c" if compiler == "clang" else "c++",
                                 "-fsyntax-only", "-I", os.path.join(out, "include"), cfile], check=True)
+
+    @unittest.skipUnless(have("node", "wasm-ld"), "needs node and wasm-ld")
+    def test_wasm_runs_like_native(self):
+        # the same program as WebAssembly (what Safari on an iPhone runs) and natively: identical results,
+        # including structs holding pointers (8 bytes in HA++ on every target) and the TLSF allocator
+        path = self.write("w.ha", """
+import "mem.ha";
+struct Pair { next: *Pair, v: u32 }
+export fn soft(x: f32) -> f32 { return sigmoid(x) + tanh(x) + max(x, 0.5) + (x as f16) as f32; }
+export fn pair_size() -> u32 { return size_of(Pair); }
+export fn link_pairs(p: *Pair, n: u32) -> u32 {
+    for i in 0..n - 1 { p[i].next = p + (i + 1); p[i].v = i * 3; }
+    p[n - 1].next = 0 as *Pair;
+    p[n - 1].v = 99;
+    var s: u32 = 0;
+    var q = p;
+    while q as u64 != 0 { s += q.v; q = q.next; }
+    return s;
+}
+export fn heap(mem: *u8, bytes: u32) -> i32 {
+    let t = tlsf_create(mem, bytes as u64);
+    let a = tlsf_malloc(t, 1000);
+    let b = tlsf_malloc(t, 50);
+    tlsf_free(t, a);
+    let c = tlsf_realloc(t, b, 3000);
+    return tlsf_check(t) * 1000 + ((c as u64) % 16) as i32 + select(c as u64 == 0, 500, 0);
+}
+""")
+        out = os.path.join(self.tmp, "build")
+        produced = build(path, ["web-wasm32", "linux-x64"], out, quiet=True)
+        xs = [-30.0, -2.5, -1e-3, 0.0, 0.3, 1.0, 7.5, 80.0, 1e-5, 65504.0]
+        js = self.write("run.mjs", f"""
+import {{ load, SIZEOF }} from "{os.path.join(out, 'web', 'w.mjs')}";
+const lib = await load(new URL("file://{produced['web-wasm32']}"));
+const e = lib.exports;
+const r = {xs}.map(x => e.soft(x));
+r.push(e.pair_size(), SIZEOF.Pair);
+r.push(e.link_pairs(lib.alloc(16 * 10), 10));
+r.push(e.heap(lib.alloc(1 << 20), 1 << 20));
+console.log(JSON.stringify(r));
+""")
+        got = subprocess.run(["node", js], capture_output=True, text=True, check=True).stdout
+        import json
+        wasm = json.loads(got)
+        lib = ctypes.CDLL(produced["linux-x64"])
+        lib.soft.restype, lib.soft.argtypes = ctypes.c_float, [ctypes.c_float]
+        lib.link_pairs.restype, lib.link_pairs.argtypes = U32, [P, U32]
+        lib.heap.restype, lib.heap.argtypes = ctypes.c_int32, [P, U32]
+        pairs, mem = np.zeros(160, np.uint8), np.zeros(1 << 20, np.uint8)
+        native = [lib.soft(x) for x in xs] + [16, 16, lib.link_pairs(pairs.ctypes.data, 10),
+                                              lib.heap(mem.ctypes.data, 1 << 20)]
+        # the std math functions may round an ulp differently: x86-64-v3 and ARM64 fuse multiply-adds
+        # (fast-math contraction), WebAssembly has no fma instruction. Everything else is exact.
+        np.testing.assert_allclose(wasm[:len(xs)], native[:len(xs)], rtol=2.5e-7, atol=0)
+        self.assertEqual(wasm[len(xs):], native[len(xs):])
+        self.assertEqual(wasm[-2:], [207, 0])
 
     @unittest.skipUnless(have("qemu-aarch64", "ld.lld"), "needs qemu-aarch64 and ld.lld")
     def test_arm64_matches_x86_64(self):

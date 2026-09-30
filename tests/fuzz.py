@@ -4,6 +4,7 @@ Each generated program computes many random expressions over i32 / u32 / f32 inp
 The same code runs:
   * natively on x86-64 (export fn, via ctypes)
   * on ARM64 (the phones' CPU) under qemu-aarch64
+  * as WebAssembly (the web-wasm32 target, as browsers run it) in Node
   * on a Vulkan GPU (the kernel version, via the HA++ runtime)
   * as Metal source, compiled with clang++ and tests/metal_shim (emulation)
 and every result is compared with an exact Python model of HA++ semantics.
@@ -197,6 +198,25 @@ def ulp(x):
     return float(np.spacing(F(abs(x))))
 
 
+def quantum(v):
+    """Value of the lowest set bit of v (v = n * quantum, n odd); infinite for 0."""
+    if v == 0:
+        return math.inf
+    fr = Fraction(v)
+    n = abs(fr.numerator)
+    return (n & -n) / fr.denominator
+
+
+def reassoc_err(*vals):
+    """Rounding a fast-math compiler may add by regrouping a sum or difference (reassoc): with
+    (c - floor(c)) - m computed as c - (floor(c) + m), the intermediate floor(c) + m can round even
+    when every step as written is exact. Sums of values on a common binary grid stay exact while
+    their magnitude is below 2^24 grid steps; otherwise one rounding of the regrouped sum is possible."""
+    total = sum(abs(v) for v in vals)
+    q = min(quantum(v) for v in vals)
+    return 0.0 if total < (1 << 24) * q else ulp(total)
+
+
 class Eval:
     """Model of HA++ semantics. Every float value carries a bound on how far a correct fast-math back
     end may be from the model (fused multiply-add, x*(1/d) for x/d, GPU division ~2.5 ulp). A
@@ -290,10 +310,10 @@ class Eval:
             fx, fy = Fraction(x), Fraction(y)
             if op == "+":
                 r, rr = self.exact(fx + fy)
-                return r, ex + ey + rr
+                return r, ex + ey + max(rr, reassoc_err(x, y))
             if op == "-":
                 r, rr = self.exact(fx - fy)
-                return r, ex + ey + rr
+                return r, ex + ey + max(rr, reassoc_err(x, y))
             if op == "*":
                 r, rr = self.exact(fx * fy)
                 return r, abs(x) * ey + abs(y) * ex + ex * ey + rr
@@ -335,7 +355,7 @@ class Eval:
         if op == "fract":
             fl = self.cut(math.floor, x, ex)
             r, rr = self.exact(Fraction(x) - fl)
-            return r, ex + rr
+            return r, ex + max(rr, reassoc_err(x, float(fl)))
         if op == "clamp":
             lo, hi = e.val
             return min(max(x, f32(lo)), f32(hi)), ex
@@ -493,6 +513,22 @@ def input_blob(ia, ua, fa):
     return struct.pack("<I12x", ROWS) + ia.tobytes() + ua.tobytes() + fa.tobytes()
 
 
+# Runs a web-wasm32 build of the fuzz program: input blob on stdin, result bytes on stdout.
+WASM_RUNNER = """import fs from "node:fs";
+const [wasmPath, outBytes] = process.argv.slice(2);
+const input = fs.readFileSync(0);
+const { instance } = await WebAssembly.instantiate(fs.readFileSync(wasmPath), { env: {} });
+const e = instance.exports, mem = e.memory;
+const base = Math.ceil(Number(e.__heap_base.value) / 16) * 16;
+const outPtr = base + Math.ceil(input.length / 16) * 16;
+const need = outPtr + Number(outBytes) + 64;
+if (need > mem.buffer.byteLength) mem.grow(Math.ceil((need - mem.buffer.byteLength) / 65536));
+new Uint8Array(mem.buffer, base, input.length).set(input);
+const n = Number(e.test_main(base, outPtr));
+process.stdout.write(new Uint8Array(mem.buffer, outPtr, n));
+"""
+
+
 def split_output(buf, counts):
     ni, nu, nf = counts
     o = np.frombuffer(buf, np.uint8)
@@ -503,10 +539,11 @@ def split_output(buf, counts):
 
 
 class Runner:
-    def __init__(self, work, use_arm=True, use_gpu=True, use_metal=True):
+    def __init__(self, work, use_arm=True, use_gpu=True, use_metal=True, use_wasm=True):
         self.work = work
         self.tc = Toolchain()
         self.use_arm = use_arm and shutil.which("qemu-aarch64") and self.tc.find("ld.lld")
+        self.use_wasm = use_wasm and shutil.which("node") and self.tc.find("wasm-ld")
         self.use_gpu = use_gpu and self.tc.find("glslangValidator")
         self.use_metal = use_metal and shutil.which("clang++")
         self.gpu = None
@@ -535,6 +572,17 @@ class Runner:
         exe = os.path.join(self.work, "fz-arm64")
         subprocess.run([self.tc.find("ld.lld"), "-static", "-e", "_start", hobj, obj, "-o", exe], check=True)
         return subprocess.run(["qemu-aarch64", exe], input=blob, capture_output=True, check=True).stdout
+
+    def run_wasm(self, src, blob, out_bytes):
+        self.wcount = getattr(self, "wcount", 0) + 1
+        wasm = build(src, ["web-wasm32"], os.path.join(self.work, f"wasm{self.wcount}"), quiet=True,
+                     bridges=False)["web-wasm32"]
+        js = os.path.join(self.work, "run_wasm.mjs")
+        if not os.path.exists(js):
+            with open(js, "w") as f:
+                f.write(WASM_RUNNER)
+        return subprocess.run(["node", js, wasm, str(out_bytes)], input=blob, capture_output=True,
+                              check=True).stdout
 
     def run_gpu(self, dll, arrays, counts):
         P, U32_ = ctypes.c_void_p, ctypes.c_uint32
@@ -649,6 +697,8 @@ def run_one(seed, runner, n_expr=24, depth=4):
     bad += compare("x86-64", split_output(raw, counts), ref, exprs, counts)
     if runner.use_arm:
         bad += compare("arm64", split_output(runner.run_arm(src, blob), counts), ref, exprs, counts)
+    if runner.use_wasm:
+        bad += compare("wasm", split_output(runner.run_wasm(src, blob, out_bytes), counts), ref, exprs, counts)
     if runner.use_gpu:
         g = runner.run_gpu(dll, (ia, ua, fa), counts)
         if g is not None:
@@ -669,7 +719,8 @@ def main():
     args = ap.parse_args()
     work = tempfile.mkdtemp(prefix="happ-fuzz-")
     runner = Runner(work)
-    print(f"back ends: x86-64{' arm64' if runner.use_arm else ''}{' vulkan' if runner.use_gpu else ''}"
+    print(f"back ends: x86-64{' arm64' if runner.use_arm else ''}{' wasm' if runner.use_wasm else ''}"
+          f"{' vulkan' if runner.use_gpu else ''}"
           f"{' metal-emu' if runner.use_metal else ''}")
     total_bad = total_skipped = 0
     for i in range(args.programs):

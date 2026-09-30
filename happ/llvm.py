@@ -88,6 +88,9 @@ class LLVMGen:
         self.warnings = []
         self.is_windows = target.get("os") == "windows"
         self.is_arm64 = target.get("arch") == "arm64"
+        # wasm32 addresses are 4 bytes, but HA++ lays every pointer out as 8 bytes on every target:
+        # there, pointers in memory are stored as i64 and converted on load/store
+        self.ptr64mem = target.get("arch") == "wasm32"
 
     # ================================================================ types
     def ll(self, t):
@@ -109,6 +112,8 @@ class LLVMGen:
 
     def llm(self, t):
         """Memory (storage) type: C layout, packed vectors."""
+        if isinstance(t, T.Ptr) and self.ptr64mem:
+            return "i64"
         if isinstance(t, T.Scalar) and t.cls == "bool":
             return "i8"
         if isinstance(t, T.Vec):
@@ -304,6 +309,9 @@ class LLVMGen:
                 c = self.inst(f"load {ct}, ptr {p}, align 4")
                 agg = self.inst(f"insertvalue {self.ll(t)} {agg}, {ct} {c}, {i}")
             return V(t, agg)
+        if t.is_ptr and self.ptr64mem:
+            i = self.inst(f"load i64, ptr {ptr}, align 8")
+            return V(t, self.inst(f"inttoptr i64 {i} to ptr"))
         return V(t, self.inst(f"load {self.ll(t)}, ptr {ptr}, align {self.align(t)}"))
 
     def store(self, v, ptr):
@@ -322,6 +330,10 @@ class LLVMGen:
                 c = self.inst(f"extractvalue {self.ll(t)} {v.ref}, {i}")
                 p = self.inst(f"getelementptr inbounds float, ptr {ptr}, i64 {i * t.n}")
                 self.emit(f"store {ct} {c}, ptr {p}, align 4")
+            return
+        if t.is_ptr and self.ptr64mem:
+            i = self.inst(f"ptrtoint ptr {v.ref} to i64")
+            self.emit(f"store i64 {i}, ptr {ptr}, align 8")
             return
         self.emit(f"store {self.ll(t)} {v.ref}, ptr {ptr}, align {self.align(t)}")
 
@@ -1603,6 +1615,8 @@ class LLVMGen:
             out += self.gen_f64_to_f16()
         if self.f16_helpers:
             out += self.gen_f16_helpers()
+        if self.ptr64mem:
+            out += self.gen_wasm_helpers()
         return out
 
     def gen_f64_to_f16(self):
@@ -1627,13 +1641,34 @@ class LLVMGen:
             "  %h = fptrunc float %fo to half",
             "  ret half %h", "}", ""]
 
-    def gen_f16_helpers(self):
-        """Half<->float conversions for x86 CPUs without F16C (e.g. the Android emulator ABI)."""
+    def gen_wasm_helpers(self):
+        """WebAssembly's f32.min/max return NaN if either input is NaN; HA++'s min/max (like ARM64's
+        fminnm/fmaxnm and x86 with LLVM's lowering) return the other operand. LLVM calls these C
+        library functions for that on wasm, and HA++ modules have no C library, so they are defined
+        here. Unused ones are removed by the linker."""
         attrs = self.attr_group()
+        out = []
+        for name, ty, pred in (("fmaxf", "float", "ogt"), ("fminf", "float", "olt"),
+                               ("fmax", "double", "ogt"), ("fmin", "double", "olt")):
+            out += [f"define hidden {ty} @{name}({ty} %a, {ty} %b) {attrs} {{",
+                    "entry:",
+                    f"  %pick = fcmp {pred} {ty} %a, %b",
+                    f"  %m = select i1 %pick, {ty} %a, {ty} %b",
+                    f"  %bnan = fcmp uno {ty} %b, %b",
+                    f"  %r = select i1 %bnan, {ty} %a, {ty} %m",
+                    f"  ret {ty} %r", "}", ""]
+        return out
+
+    def gen_f16_helpers(self):
+        """Half<->float conversions for x86 CPUs without F16C (e.g. the Android emulator ABI) and for
+        WebAssembly. On wasm, LLVM passes half values to these functions as their 16 bits (i16)."""
+        attrs = self.attr_group()
+        bits = self.ptr64mem           # wasm: i16 in, i16 out
         return [
-            f"define hidden float @__extendhfsf2(half %h) {attrs} {{",
+            (f"define hidden float @__extendhfsf2(i16 %b) {attrs} {{" if bits else
+             f"define hidden float @__extendhfsf2(half %h) {attrs} {{"),
             "entry:",
-            "  %b = bitcast half %h to i16",
+            *([] if bits else ["  %b = bitcast half %h to i16"]),
             "  %x = zext i16 %b to i32",
             "  %sign = and i32 %x, 32768",
             "  %s = shl i32 %sign, 16",
@@ -1653,7 +1688,7 @@ class LLVMGen:
             "  %r = or i32 %r2, %s",
             "  %f = bitcast i32 %r to float",
             "  ret float %f", "}", "",
-            f"define hidden half @__truncsfhf2(float %f) {attrs} {{",
+            f"define hidden {'i16' if bits else 'half'} @__truncsfhf2(float %f) {attrs} {{",
             "entry:",
             "  %x = bitcast float %f to i32",
             "  %sign = lshr i32 %x, 16",
@@ -1679,10 +1714,9 @@ class LLVMGen:
             "  %r3 = select i1 %isnan, i32 32256, i32 %r2",
             "  %r = or i32 %r3, %sgn",
             "  %h16 = trunc i32 %r to i16",
-            "  %h = bitcast i16 %h16 to half",
-            "  ret half %h", "}", "",
-            f"define hidden half @__truncdfhf2(double %d) {attrs} {{",
+            *(["  ret i16 %h16", "}", ""] if bits else ["  %h = bitcast i16 %h16 to half", "  ret half %h", "}", ""]),
+            f"define hidden {'i16' if bits else 'half'} @__truncdfhf2(double %d) {attrs} {{",
             "entry:",
             '  %h = call half @"ha.f64_to_f16"(double %d)',
-            "  ret half %h", "}", "",
+            *(["  %hb = bitcast half %h to i16", "  ret i16 %hb", "}", ""] if bits else ["  ret half %h", "}", ""]),
         ]

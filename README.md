@@ -45,7 +45,7 @@ For GPU kernels, also install `glslangValidator` (Vulkan SDK, or `apt install gl
 ./happ.sh doctor                        # which tools were found   (Windows: happ doctor)
 ./happ.sh run examples/hello.ha         # compile + run on this PC
 ./happ.sh build gaussian/splat.ha -t phones    # Android + iPhone libraries
-./happ.sh build my.ha -t all            # all 11 targets
+./happ.sh build my.ha -t all            # all 12 targets
 ./happ.sh emit my.ha asm -t android-arm64            # see the ARM64 assembly
 python3 gaussian/render.py --out splats.png    # render splats on this PC's GPU
 python3 gaussian/build_ios.py                  # iPhone installer (.ipa), no Mac or Xcode needed
@@ -142,7 +142,8 @@ All of this runs in `python3 -m unittest discover -s tests` (32 tests):
 | **Differential fuzzing:** random programs run on x86-64, ARM64, Vulkan and Metal emulation vs an exact model (`tests/fuzz.py`; 120 programs, about 540,000 results, 0 mismatches) | ✅ tested |
 | CPU code on x86-64: language features, math accuracy (exp/log ≤ 2 ulp) | ✅ tested |
 | **ARM64 code**, the phones' CPU: 166 results under `qemu-aarch64` match x86-64 exactly | ✅ tested |
-| All 11 targets link without NDK/Xcode; Android `.so` is 16 KB aligned; generated C header compiles | ✅ tested |
+| All 12 targets link without NDK/Xcode; Android `.so` is 16 KB aligned; generated C header compiles | ✅ tested |
+| **WebAssembly** (`web-wasm32`, what browsers and Safari on iPhone run): same results as x86-64 in Node, in the fuzzer too | ✅ tested |
 | Vulkan kernels (SPIR-V validated) run on a real Vulkan driver (lavapipe) and match the CPU | ✅ tested |
 | GPU edge cases: matrix writes in buffers, atomics run once, integer division by 0 and -1, f16 math, nested arrays | ✅ tested |
 | Vulkan runtime: hundreds of dispatches per batch, bad calls rejected and recovered from | ✅ tested |

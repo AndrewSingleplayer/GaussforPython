@@ -33,6 +33,9 @@ TARGETS = {
                       cpu=["-march=x86-64-v3"]),
     "linux-arm64": dict(triple="aarch64-linux-gnu", arch="arm64", os="linux", kind="shared",
                         cpu=["-march=armv8-a"]),
+    # browsers (Safari on iPhone included): SIMD128, bulk memory, saturating float->int in hardware
+    "web-wasm32": dict(triple="wasm32-unknown-unknown", arch="wasm32", os="web", kind="wasm",
+                       cpu=["-msimd128", "-mbulk-memory", "-mnontrapping-fptoint", "-msign-ext"]),
 }
 
 GROUPS = {
@@ -40,6 +43,7 @@ GROUPS = {
     "ios": ["ios-arm64", "ios-sim-arm64", "ios-sim-x64"],
     "phones": ["android-arm64", "android-x64", "ios-arm64", "ios-sim-arm64", "ios-sim-x64"],
     "desktop": ["windows-x64", "macos-arm64", "macos-x64", "linux-x64"],
+    "web": ["web-wasm32"],
     "all": list(TARGETS),
 }
 
@@ -67,7 +71,7 @@ def target_info(name, cpu=None):
         flag = "-mcpu=" if t["os"] in ("ios", "macos") and t["arch"] == "arm64" else "-march="
         t["cpu"] = [flag + cpu]
     flags = " ".join(t["cpu"])
-    t["f16_helpers"] = t["arch"] == "x86_64" and not any(x in flags for x in ("x86-64-v3", "x86-64-v4",
+    t["f16_helpers"] = t["arch"] == "wasm32" or t["arch"] == "x86_64" and not any(x in flags for x in ("x86-64-v3", "x86-64-v4",
                                                                                "native"))
     return t
 
@@ -134,6 +138,7 @@ class Toolchain:
                           ("ld.lld", "links Android/Linux .so"),
                           ("lld-link", "links Windows .dll"),
                           ("llvm-ar", "makes iOS/macOS .a libraries"),
+                          ("wasm-ld", "links WebAssembly modules (web browsers)"),
                           ("llvm-lipo", "merges iOS simulator slices"),
                           ("llvm-nm", "checks libraries for missing symbols"),
                           ("llvm-dlltool", "Windows GPU runtime (kernel32 import library)"),
