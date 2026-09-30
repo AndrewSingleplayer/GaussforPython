@@ -78,6 +78,15 @@ several degrees in a fast turn. The tracker keeps 2.5 s of readings and of its o
 Every 10 frames it looks for the delay (0-200 ms) that makes the gyroscope's turning between
 frames match the image's turning. It takes the median of the last 7 clear answers.
 
+**Drawing without lag.** The tracker's answer is for the frame it was given. By the time the
+answer comes back, the screen usually shows the next camera frame, and in Low Power Mode that
+is 33 ms later. Drawn with that pose, the scene trails the camera image: 3° at a 90°/s turn,
+about 60 points on an iPhone screen. So the page brings the pose forward to the frame on screen.
+The rotation uses the gyroscope's turning between the two frames, read with the measured camera
+delay. The position uses the tracked velocity. The camera is also asked for 60 fps, which halves
+the time between frames where the phone allows it. The readout shows the camera's real frame
+rate and delay.
+
 **Measured on simulated walks** (`tests/track_sim.py`). The simulator renders a textured floor
 for a moving camera: 2x supersampled, noise, exposure drift, optional motion blur, rolling
 shutter, boxes standing on the floor. The simulated gyroscope has delay, drift and noise. The

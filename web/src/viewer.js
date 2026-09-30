@@ -548,7 +548,7 @@ function updateHud(now, w, h) {
     hud.track.hidden = !ar.on;
     if (ar.on) {
       hud.track.textContent = ar.trackError ? "floor tracking off (rotation only)"
-        : t ? `floor: ${t.inliers || t.points} points, ${t.ms.toFixed(1)} ms, camera delay ${Math.round(t.lag)} ms`
+        : t ? `floor: ${t.inliers || t.points} points, ${t.ms.toFixed(1)} ms · camera ${Math.round(1000 / (ar.frameMs || 33))} fps, ${Math.round(t.lag)} ms late`
         : "floor: starting";
     }
     hud.quality.textContent = quality.mode === "auto"
