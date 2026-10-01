@@ -109,7 +109,7 @@ kernel fade_gpu(s: *Splat, n: u32, k: f32) {
 | `examples/ai/nn.ha` | matmul, softmax, layer norm, GELU: a transformer MLP block on GPU and CPU |
 | `tests/` | test suite (see below) |
 | `bench/` | speed comparisons: `bench.py` (HA++ vs C and NumPy), `alloc_bench.py` (allocators vs glibc and a C TLSF) |
-| `docs/` | [language](docs/LANGUAGE.md), [platforms](docs/PLATFORMS.md), [GPU](docs/GPU.md), [splats](docs/SPLATS.md), [memory](docs/MEMORY.md), [AR in the browser](docs/AR.md) |
+| `docs/` | [language](docs/LANGUAGE.md), [platforms](docs/PLATFORMS.md), [GPU](docs/GPU.md), [splats](docs/SPLATS.md), [memory](docs/MEMORY.md), [AR in the browser](docs/AR.md), [to be added: 4D splat animation](docs/4D-SPLATS.md) |
 
 ## Speed
 

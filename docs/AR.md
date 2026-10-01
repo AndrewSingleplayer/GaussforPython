@@ -182,6 +182,11 @@ recorded on it. Everything else above comes from simulations and a desktop brows
 | People walking in front | a person-detection model running in the browser outlines people in the camera image; their feet touch the tracked floor, which says how far away they are, so they hide the scene only when they are closer | medium; speed on older phones is the risk |
 | Everything else: pillars, display cases, furniture | needs a distance for every pixel. ARKit gets it from LiDAR; in a browser it takes a depth-estimation network, which is slow on phones and blurry at edges | hard |
 
+**Animation (to be added):**
+- Playing finished 4D Gaussian splat animations, in the viewer and in AR.
+- The plan, the file format, the size budget and the measured speeds are in
+  [4D-SPLATS.md](4D-SPLATS.md).
+
 **The native app (a separate path):**
 - **Built but never run.** `gaussian/build_ios.py` builds `Splats.ipa` without a Mac, but the app
   has never been run on an iPhone.
