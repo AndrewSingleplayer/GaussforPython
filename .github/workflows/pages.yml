@@ -7,7 +7,7 @@ name: Web viewer (GitHub Pages)
 on:
   push:
     branches: [claude/quirky-ramanujan-sfipfx]
-    paths: ["web/**", "happ/**", "gaussian/scenes.py", ".github/workflows/pages.yml"]
+    paths: ["web/**", "happ/**", "gaussian/scenes.py", "tests/test_browser.py", ".github/workflows/pages.yml"]
   workflow_dispatch:
 
 permissions:
@@ -52,6 +52,13 @@ jobs:
           python3 web/build.py
           rm -f web/dist/scenes/*.hspl
           du -sh web/dist
+      - name: Check the AR page in a browser before publishing it
+        # headless Chromium, fake camera, simulated motion sensors: AR starts, the ring shows, a tap
+        # places the scene, no script errors. If this fails, the live page stays as it was.
+        run: |
+          pip install -q playwright
+          python3 -m playwright install --with-deps chromium
+          python3 -m unittest -v tests/test_browser.py
       - uses: actions/upload-pages-artifact@v3
         if: steps.pages.outputs.enabled == 'true'
         with:

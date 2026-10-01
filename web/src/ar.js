@@ -96,6 +96,8 @@ export class LookAroundAR {
     this.track = null;               // the floor tracker's last answer
     this.trackError = "";
     this.readings = [];
+    this.motionEvents = 0;
+    this.startedAt = 0;
     this.frameSink = null;           // (slot) => copies the video's current frame into texture slot
     this.shownSlot = -1;             // camera texture to draw (-1: none yet, the <video> shows)
     this.pendingSlot = -1;           // texture holding the frame the tracker is working on
@@ -134,8 +136,12 @@ export class LookAroundAR {
     this.video.hidden = false;
     await this.video.play();
     this.readings = [];              // motion sensor readings not yet sent to the tracker
+    this.motionEvents = 0;
+    this.startedAt = performance.now();
+    this.frameError = "";
     this.onOrient = (e) => {
       if (e.alpha === null || e.beta === null || e.gamma === null) return;
+      this.motionEvents++;
       this.R = deviceRotation(e.alpha, e.beta, e.gamma);
       this.readings.push({ t: e.timeStamp || performance.now(), C: cameraToWorld(this.R, this.screenAngle()) });
       if (this.readings.length > 120) this.readings.shift();
@@ -186,7 +192,12 @@ export class LookAroundAR {
           this.frameSink(0);
           this.shownSlot = 0;
         }
-        this.sendFrame(now);
+        try {                          // one bad frame mustn't stop the frames that follow
+          this.sendFrame(now);
+        } catch (e) {
+          this.frameError = String((e && e.message) || e);
+          this.busy = false;
+        }
         next();
       };
       if (this.video.requestVideoFrameCallback) this.video.requestVideoFrameCallback(frame);
@@ -385,10 +396,8 @@ export class LookAroundAR {
     const f = this.focal(canvasW, cssW, cssH);
     const W2C = transpose(C);
     const out = { focal: f, world: { rows: W2C, t: mulv(W2C, T).map((v) => -v) }, reticle: null };
-    if (!this.placed) {
-      const hit = this.surfaceHit(C, [0, 0, 1], T);
-      this.onTable = !!(hit && hit.table);             // the ring shows the size it will have there
-    }
+    const hit = this.placed ? null : this.surfaceHit(C, [0, 0, 1], T);
+    if (!this.placed) this.onTable = !!(hit && hit.table);   // the ring shows the size it will have there
     const s = this.scale(stats);
     const footprint = 1.1 * s * stats.radius;          // radius of the floor the scene covers
     this.footprint = footprint;

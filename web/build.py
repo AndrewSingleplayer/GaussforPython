@@ -15,7 +15,9 @@ Output:
 Test locally: python3 -m http.server -d web/dist 8000, then open http://localhost:8000
 """
 import argparse
+import hashlib
 import json
+import re
 import os
 import shutil
 import sys
@@ -73,8 +75,24 @@ def main():
         wasm = happ_build(os.path.join(HERE, "track.ha"), ["web-wasm32"], tmp, quiet=True,
                           bridges=False)["web-wasm32"]
         shutil.copyfile(wasm, os.path.join(DIST, "track.wasm"))
-    for f in ("engine.mjs", "worker.js", "viewer.js", "ar.js", "tracker.mjs", "track-worker.js"):
-        shutil.copyfile(os.path.join(HERE, "src", f), os.path.join(DIST, f))
+    # Every reference between the page's files carries this build's version (?v=...), so a browser
+    # that still has some files of an older build cached can't mix them with new ones.
+    sources = ("engine.mjs", "worker.js", "viewer.js", "ar.js", "tracker.mjs", "track-worker.js")
+    digest = hashlib.sha256()
+    for f in sources + ("app.html",):
+        with open(os.path.join(HERE, "src", f), "rb") as fh:
+            digest.update(fh.read())
+    for f in ("splatweb.wasm", "track.wasm"):
+        with open(os.path.join(DIST, f), "rb") as fh:
+            digest.update(fh.read())
+    version = digest.hexdigest()[:10]
+    stamp = lambda text: re.sub(r"""(["'])\./([\w-]+\.(?:js|mjs|wasm|json))\1""",
+                                lambda m: f"{m[1]}./{m[2]}?v={version}{m[1]}", text)
+    for f in sources:
+        with open(os.path.join(HERE, "src", f)) as fh:
+            text = fh.read()
+        with open(os.path.join(DIST, f), "w") as fh:
+            fh.write(stamp(text))
     entries = []
     for name in names:
         path = os.path.join(DIST, "scenes", f"{name}.hspl")
@@ -91,7 +109,7 @@ def main():
     with open(os.path.join(DIST, "scenes.json"), "w") as fh:
         json.dump(entries, fh, indent=1)
     with open(os.path.join(HERE, "src", "app.html")) as fh:
-        app = fh.read()
+        app = stamp(fh.read())
     with open(os.path.join(DIST, "app.html"), "w") as fh:
         fh.write(app)
     with open(os.path.join(DIST, "index.html"), "w") as fh:
@@ -99,7 +117,8 @@ def main():
                  '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n'
                  '</head>\n<body>\n' + app + '</body>\n</html>\n')
     total = sum(e["bytes"] for e in entries)
-    print(f"web viewer in {os.path.relpath(DIST)}: {len(entries)} scenes, {total / 1e6:.1f} MB of scene data")
+    print(f"web viewer in {os.path.relpath(DIST)}: {len(entries)} scenes, {total / 1e6:.1f} MB of scene data, "
+          f"version {version}")
 
 
 if __name__ == "__main__":

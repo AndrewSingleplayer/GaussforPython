@@ -601,7 +601,29 @@ matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { bg
 let prev = performance.now();
 let hudTimer = 0;
 let lastDrawn = 0;
+// One frame. Whatever goes wrong in it, the next one still comes, and the error shows on screen
+// (a silent stop would leave the page frozen with no clue why).
 function frame(now) {
+  try {
+    drawFrame(now);
+  } catch (e) {
+    showError(e);
+  }
+  requestAnimationFrame(frame);
+}
+
+let lastError = "";
+function showError(e) {
+  const msg = String((e && (e.message || e.reason)) || e);
+  if (msg === lastError) return;
+  lastError = msg;
+  console.error(e);
+  setStatus("Something went wrong: " + msg + " — reload the page; if it stays, send a screenshot of this.");
+}
+window.addEventListener("error", (ev) => showError(ev.error || ev.message));
+window.addEventListener("unhandledrejection", (ev) => showError(ev.reason));
+
+function drawFrame(now) {
   const dt = Math.min(0.1, (now - prev) / 1000);
   prev = now;
   if (autoRotate && !ar.on && pointers.size === 0 && now - lastInput > 2500) { cam.yaw += dt * 0.25; dirty = true; }
@@ -609,7 +631,6 @@ function frame(now) {
   const [w, h] = resize();
   if (!dirty) {                              // nothing changed: don't redraw (saves the battery)
     updateHud(now, w, h);
-    requestAnimationFrame(frame);
     return;
   }
   dirty = false;
@@ -639,7 +660,10 @@ function frame(now) {
            : "Tap to put it on the floor · move around a table to find it");
     }
   } else if (ar.on) {
-    arHint(scene ? "Waiting for the motion sensors…" : "Loading the scene…");
+    const silent = ar.motionEvents === 0 && performance.now() - ar.startedAt > 2500;
+    arHint(!scene ? "Loading the scene…"
+         : silent ? "No motion sensor readings: in Settings › Apps › Safari allow Motion & Orientation Access, then reload"
+         : `Waiting for the motion sensors… (${ar.motionEvents} readings)`);
   }
   if (scene && (!ar.on || (arView && arView.draw))) {
     const v = arView ? arView.draw : viewRows();
@@ -682,7 +706,6 @@ function frame(now) {
     adapt(fpsWindow.fps);
   }
   updateHud(now, w, h);
-  requestAnimationFrame(frame);
 }
 
 function updateHud(now, w, h) {
@@ -702,6 +725,7 @@ function updateHud(now, w, h) {
     hud.track.hidden = !ar.on;
     if (ar.on) {
       hud.track.textContent = ar.trackError ? "floor tracking off (rotation only)"
+        : ar.frameError ? `camera frames: ${ar.frameError}`
         : t ? `floor: ${t.inliers || t.points} points, ${t.ms.toFixed(1)} ms · camera ${Math.round(1000 / (ar.frameMs || 33))} fps, ${Math.round(t.lag)} ms late · light ${lightMatch ? ar.lighting().exposure.toFixed(2) + "×" : "original"}`
         : "floor: starting";
     }
