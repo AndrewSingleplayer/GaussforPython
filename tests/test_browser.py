@@ -52,7 +52,8 @@ class ARPage(unittest.TestCase):
             kw = {"executable_path": CHROME} if os.path.exists(CHROME) else {"channel": "chromium"}
             browser = await p.chromium.launch(args=args, **kw)
             ctx = await browser.new_context(viewport={"width": 393, "height": 852}, is_mobile=True, has_touch=True)
-            await ctx.grant_permissions(["camera"], origin=origin)
+            # newer Chrome asks for motion sensor access like Safari does: grant it with the camera
+            await ctx.grant_permissions(["camera", "accelerometer", "gyroscope", "magnetometer"], origin=origin)
             page = await ctx.new_page()
             errors, console = [], []
             page.on("pageerror", lambda e: errors.append(str(e)))

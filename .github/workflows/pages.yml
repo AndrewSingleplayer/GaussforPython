@@ -55,8 +55,6 @@ jobs:
       - name: Check the AR page in a browser before publishing it
         # headless Chromium, fake camera, simulated motion sensors: AR starts, the ring shows, a tap
         # places the scene, no script errors. If this fails, the live page stays as it was.
-        # (report-only until it has passed here once: GitHub's browser differs from the local one)
-        continue-on-error: true
         run: |
           pip install -q playwright
           python3 -m playwright install --with-deps chromium
