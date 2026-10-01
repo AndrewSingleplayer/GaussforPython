@@ -126,8 +126,23 @@ Animated splats in a browser are not new:
 - **[Chronosplat](https://radiancefields.com/chronosplat-plays-4d-gaussian-splat-sequences-from-static-files-in-the-browser)**
   streams compressed frames as a flipbook.
 
-What is less common is animated splats in AR on an iPhone, in Safari, with the page's own tracking
-and no WebXR. Before calling it a first, search again and test it on several phones.
+These are viewers built for desktop browsers. None of them does AR.
+
+Animated splats on phones and in AR exist elsewhere, but in other forms:
+- **Headset apps:** [Gracia](https://radiancefields.com/4d-gaussian-splatting) ships streamable
+  4D splat apps on Quest and Apple Vision Pro. These are native apps, not phones and not a browser.
+- **Research players for phones:** [DualGS](https://arxiv.org/pdf/2409.08353) and
+  [4DGCPro](https://arxiv.org/html/2509.17513v2).
+- **Skinned splat avatars:** they run on the web, on phones and in VR, and reach AR through WebXR
+  ([arXiv 2510.13978](https://arxiv.org/html/2510.13978v2)). Safari on iPhone has no WebXR, so
+  their AR doesn't run there.
+- **Still splats in web AR on iPhone:**
+  [8th Wall / Niantic Studio](https://8thwall.com/docs/studio/guides/gaussian-splats) supported
+  them until it shut down in February 2026.
+
+A short search (October 2026) found no 4D splat animation in AR in Safari on an iPhone, with the
+page's own tracking and no WebXR. That may make this the first of its kind, but a short search
+can't prove it. It also counts only once it is built and works reliably on several phones.
 
 ## Open questions
 
