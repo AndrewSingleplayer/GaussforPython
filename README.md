@@ -37,9 +37,11 @@ phone runs the same `.so`.*
   Details: [web/README.md](web/README.md).
 - **AR in Safari on iPhone, without WebXR:** the same page, published by
   `.github/workflows/pages.yml` at https://andrewsingleplayer.github.io/GaussforPython/ (once
-  GitHub Pages is on: Settings > Pages > Source: GitHub Actions). A ring shows the floor, a tap
-  stands the scene on it, and floor tracking written in HA++ (compiled to WebAssembly) follows
-  the floor in the camera image, so the scene stays on its spot as you walk around it.
+  GitHub Pages is on: Settings > Pages > Source: GitHub Actions). A ring shows the floor or a
+  table, and a tap stands the scene on it. Tracking written in HA++ (compiled to WebAssembly)
+  follows the floor in the camera image, so the scene stays on its spot as you walk around it. It
+  also finds the scene's spot again after tracking is lost, and matches the room's light. What it
+  is, how fast it is and what is still needed: [docs/AR.md](docs/AR.md).
 - **Native iPhone app:** `python3 gaussian/build_ios.py` makes `Splats.ipa` without a Mac (see
   [gaussian/README.md](gaussian/README.md)).
 
@@ -107,7 +109,7 @@ kernel fade_gpu(s: *Splat, n: u32, k: f32) {
 | `examples/ai/nn.ha` | matmul, softmax, layer norm, GELU: a transformer MLP block on GPU and CPU |
 | `tests/` | test suite (see below) |
 | `bench/` | speed comparisons: `bench.py` (HA++ vs C and NumPy), `alloc_bench.py` (allocators vs glibc and a C TLSF) |
-| `docs/` | [language](docs/LANGUAGE.md), [platforms](docs/PLATFORMS.md), [GPU](docs/GPU.md), [splats](docs/SPLATS.md), [memory](docs/MEMORY.md) |
+| `docs/` | [language](docs/LANGUAGE.md), [platforms](docs/PLATFORMS.md), [GPU](docs/GPU.md), [splats](docs/SPLATS.md), [memory](docs/MEMORY.md), [AR in the browser](docs/AR.md) |
 
 ## Speed
 
@@ -149,7 +151,7 @@ glibc's `memcpy` uses `rep movsb`.
 
 ## What was tested (and what was not)
 
-All of this runs in `python3 -m unittest discover -s tests` (32 tests):
+All of this runs in `python3 -m unittest discover -s tests` (45 tests):
 
 | Area | Status |
 |---|---|
@@ -170,7 +172,11 @@ All of this runs in `python3 -m unittest discover -s tests` (32 tests):
 | Metal kernels: compiled and run through a C++ stand-in for `metal_stdlib`, match the CPU | ⚠️ emulated, not Apple's compiler |
 | Swift wrapper and `SplatRenderer.swift` | ⚠️ generated/written, not compiled (no Swift toolchain here) |
 | iPhone app `Splats.ipa`: builds without Apple files; Mach-O checked (arm64, iOS 15, entry point, every import bound to its iOS library) | ⚠️ built and checked, not run on an iPhone |
-| Running on a real Android phone / iPhone | ❌ not yet (no device available) |
+| Web viewer: decode and sort through HA++ WebAssembly and the JavaScript fallback, checked against NumPy | ✅ tested |
+| Browser AR tracking on simulated walks: floors, fast turns with a late camera, rolling shutter, a table, recovery after the camera is covered, a wrong height and lens (`tests/test_track.py`) | ✅ tested |
+| The AR page in headless Chromium with a fake camera and motion sensors: AR starts, the ring shows, a tap places the scene, no script errors (`tests/test_browser.py`, run before every deploy) | ✅ tested |
+| Web viewer and AR on a real iPhone (17 Pro Max) | ⚠️ works (the user's report); no numbers recorded yet ([docs/AR.md](docs/AR.md#measuring-on-a-phone)) |
+| Native apps on a real Android phone / iPhone | ❌ not yet (no device available) |
 
 ## Honest limits (version 0.1)
 

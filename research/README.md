@@ -25,8 +25,9 @@ What the renderers in this repository are based on, with the measurements behind
 4. **Sorting: simple wins on this machine.** A 16-bit counting sort beat a branch-free variant
    and a two-pass radix sort (13 ms for 740k splats in WebAssembly). The radix sort may still win
    on a phone's smaller caches: that needs a phone.
-5. **HA++ in WebAssembly vs JavaScript:** up to 3× faster for math (decode), the same for
-   memory-bound work (sort).
+5. **HA++ in WebAssembly vs JavaScript:** the same speed once V8 has warmed up, for decoding and
+   sorting alike. WebAssembly is up to 3× faster on a page's first, small load, before the
+   JavaScript is warmed up. Safari not yet measured.
 6. **View-dependent colour is scene-dependent:** 16% of the colour variation for glossy
    figurines, 0.2% for a matte plush. SH degree 1 as an option is the next quality step.
 7. **iPhone Safari has no WebXR.** AR in the browser uses the camera plus the motion sensors
@@ -34,12 +35,15 @@ What the renderers in this repository are based on, with the measurements behind
    the floor, so no second view is needed to start. The camera image arrives 50-100 ms after the
    motion sensor readings. The tracker measures that delay on the fly, and it checks the
    gyroscope against the image before trusting it. On simulated walks a placed spot stays within
-   1-3 pixels.
+   1-3 pixels. Tables are found as surfaces, a top-down picture of the floor brings the scene back
+   after tracking is lost, and the splats are drawn to match the room's light without changing the
+   data. What it is, its speeds and what is still needed: [../docs/AR.md](../docs/AR.md).
 
 ## Next
 
 - v1 compute renderer: exact ellipse–tile test (1.2–3.8× fewer pairs to sort), scaled-f16 covariance.
 - SH degree 1 option in the web format.
-- Relocalization for the floor tracker: find the old floor points again after tracking is lost.
-- Measurements on an actual iPhone: the fps the adaptive controller settles on, WebAssembly vs
-  JavaScriptCore, radix vs counting sort.
+- Measurements on actual phones (an older iPhone and an Android phone too): the fps the adaptive
+  controller settles on, WebAssembly vs JavaScriptCore, radix vs counting sort, and the tracking
+  time and camera delay the AR page reports.
+- AR: a test on a real museum floor, and the other items in [../docs/AR.md](../docs/AR.md#what-is-still-needed).

@@ -62,10 +62,13 @@ The web viewer sorts on the CPU, in a Web Worker, by depth: a 16-bit key per vis
 - **Radix sort didn't beat the counting sort** on this machine, whose CPU has 266 MB of cache:
   the counting sort's scattered writes still hit in cache. A phone's much smaller caches may
   favour the radix version. That needs a measurement on a phone.
-- **WebAssembly vs JavaScript:** decoding (math-heavy: `exp`, quaternion → matrix) was up to 3×
-  faster in HA++/WebAssembly than in JavaScript. The sort (memory-bound) runs at the same speed:
-  V8 compiles a plain typed-array loop about as well as LLVM does. Safari's JavaScript engine
-  (JavaScriptCore) has to be measured on the phone itself.
+- **WebAssembly vs JavaScript:** once V8 has warmed up, both run at the same speed, for the sort
+  (memory-bound) and for decoding (`exp`, quaternion → matrix) alike: V8 compiles a plain
+  typed-array loop about as well as LLVM does. WebAssembly is faster on a page's first, small
+  load, which JavaScript runs before it has warmed up. In a fresh process the unicorn (50k splats)
+  decodes in 7-8 ms against 23-34 ms, which is the "up to 3×" first reported here. The raccoons
+  (865k) take 120-137 ms in both. All six scenes: [`../docs/AR.md`](../docs/AR.md#speeds).
+  Safari's JavaScript engine (JavaScriptCore) has to be measured on the phone itself.
 - **Sorting less:** the sort runs only when the camera moves, and drawing never waits for it. It
   uses the last order, as every web splat viewer does.
 

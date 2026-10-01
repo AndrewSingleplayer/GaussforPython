@@ -180,9 +180,12 @@ from its spot on terrazzo, tiles, wood and carpet; without the floor memory it i
 every second frame.
 
 What it doesn't do yet:
-- **Real devices.** These numbers are from simulations and a desktop browser. The camera delay,
+- **Real devices.** These numbers are from simulations and a desktop browser. The page has been
+  run on an iPhone 17 Pro Max, where it works, but no numbers were recorded. The camera delay,
   the lens and Safari's frame timing on an actual iPhone are measured by the tracker itself as it
   runs; the page shows them.
+- The full list (floors and light at the venue, the real-world size, occlusion, publishing) is in
+  [../docs/AR.md](../docs/AR.md#what-is-still-needed).
 
 8th Wall, the main commercial browser SLAM, shut down its hosted service in February 2026. Its
 open-source release doesn't include the SLAM engine (that exists only as a binary under its own

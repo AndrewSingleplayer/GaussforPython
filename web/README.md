@@ -33,7 +33,9 @@ Safari on iPhone has no WebXR, so the page does what ARKit would: it finds the f
 | Light | Web Worker + GPU | `light_stats` in `track.ha` measures the room's brightness and colour cast and the floor's colour under the scene; the splats are drawn to match (brightness, tint, contact shading, floor bounce), edited in the shader as they are drawn, never in the data. "Light: original" turns it off |
 | Timing | Web Worker | camera frames reach the page 50-100 ms after the motion sensor readings. The tracker measures that delay from how the gyroscope's turning and the image's turning line up, and a search of the whole image's shift catches what the gyroscope gets wrong |
 
-On simulated walks (`tests/track_sim.py`: a textured floor rendered for a moving camera, sensors with delay, drift and noise) a spot on the floor is drawn within 1-3 pixels of the tracking image of where it really is. That holds on terrazzo, tiles, wood and carpet, through 275°/s turns, rolling shutter and motion blur, and after a full 360° walk around it. Each frame takes about 2 ms. `tests/test_track.py` runs four of these walks.
+On simulated walks (`tests/track_sim.py`: a textured floor rendered for a moving camera, sensors with delay, drift and noise) a spot on the floor is drawn within 1-3 pixels of the tracking image of where it really is. That holds on terrazzo, tiles, wood and carpet, through 275°/s turns, rolling shutter and motion blur, and after a full 360° walk around it. Each frame takes about 2 ms. `tests/test_track.py` runs seven cases, tables and recovery included.
+
+What this AR is (and isn't), the measured speeds, and what is still needed: [docs/AR.md](../docs/AR.md).
 
 ## Files
 
@@ -49,6 +51,6 @@ On simulated walks (`tests/track_sim.py`: a textured floor rendered for a moving
 
 The scene files in `dist/scenes/` are WebAssembly modules whose only content is one data segment holding the `.hspl` bytes, at the offset listed in `scenes.json`. Some hosts serve only web file types; a claude.ai artifact is one. The viewer reads the bytes directly and never needs to run these modules.
 
-Tests: `tests/test_web.py` runs the pack → decode → sort path in Node, through both the WebAssembly engine and the JavaScript one, and checks it against NumPy.
+Tests: `tests/test_web.py` runs the pack → decode → sort path in Node, through both the WebAssembly engine and the JavaScript one, and checks it against NumPy. `tests/test_browser.py` opens the built page in headless Chromium with a fake camera, starts AR and places the scene. The deploy workflow runs it before publishing.
 
 Scenes: [Babylon.js Assets](https://github.com/BabylonJS/Assets), CC BY 4.0.
