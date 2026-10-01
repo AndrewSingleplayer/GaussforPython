@@ -13,73 +13,103 @@ move.
 
 | Already there | How the animation uses it |
 |---|---|
-| The 16-byte download format and its decoder (`web/pack.py`, `web/splatweb.ha`) | colour, opacity and scale are stored once, and only the movement per key frame |
+| The 16-byte download format and its decoder (`web/pack.py`, `web/splatweb.ha`) | the splats are stored once; after that, only the groups' changes per frame |
 | The sort in a background thread (HA++ → WebAssembly) | runs every frame while the animation plays, not only when the camera moves |
-| Edits made while drawing (the light matching in `web/src/viewer.js`) | the GPU blends between key frames in the same place, without changing the data |
+| Edits made while drawing (the light matching in `web/src/viewer.js`) | the GPU moves each splat by its groups in the same place, without changing the data |
 | AR placement and tracking (`web/src/ar.js`, `web/src/tracker.mjs`) | unchanged |
 
 ## Input formats
 
 | What the animation file is | What playback needs | Effort |
 |---|---|---|
-| **A sequence of `.ply` files**, one per frame (the most common export) | pack them into one file: what doesn't change once, then only the movement per key frame; blend between key frames | medium; the file size is the limit |
+| **A sequence of `.ply` files**, one per frame (the most common export) | find groups of splats that move together and store only each group's change per frame (below) | medium |
 | **Splats with built-in motion**: each splat carries its own path over time (Spacetime Gaussians) | compute each splat's position for the current moment while drawing | medium; small files |
-| **A trained network that moves the splats** (most 4DGS research code) | convert it ("bake" it) on a PC into one of the two above first | a conversion step on top |
-| **Splats attached to a skeleton** | store only the bone movements per frame | medium to hard; needs a rigged source |
+| **A trained network that moves the splats** (most 4DGS research code) | convert it ("bake" it) on a PC into a `.ply` sequence first | a conversion step on top |
+| **Splats attached to a skeleton** | the bones are the groups; store only their changes | medium |
 
 Start with the `.ply` sequence: it is what most tools export.
 
-## File format (plan)
+**Which sequences the group method fits.** Each splat has to keep its identity across frames:
+splat 7 in frame 1 is splat 7 in frame 2. 4DGS methods that move one fixed set of splats export
+it that way. Sequences trained frame by frame, where every frame has its own splats, don't. Those
+need the splats matched between frames first, or they fall back to storing each splat's movement.
 
-- **Header:** the splat count, the number of key frames, key frames per second, and the bounding
-  box over all frames.
-- **Still part, once:** the current 16 bytes per splat, taken from the first frame.
-- **Moving part, per key frame:** 10 bytes per moving splat.
-  - position: 3 x 16 bits, relative to the bounding box;
-  - rotation: 4 x 8 bits.
-- **Only splats that move are stored per key frame.** A list says which they are, so splats that
-  never move cost nothing after the first frame.
-- **Key frames:** 5-10 per second. In between, the GPU blends them: positions linearly, rotations
-  normalised.
-- **Order:** key frames are stored in time order, so playback can start as soon as the first
-  second has arrived.
+## How the motion is stored: groups and deltas (plan)
+
+Neighbouring splats move together. A hand's splats all follow the hand, and a lid's splats all
+follow the lid. So the motion is stored per group, not per splat. The idea came from xplor3d. In
+research, SC-GS (Sparse-Controlled Gaussian Splatting, CVPR 2024) drives all splats from a few
+hundred control points the same way.
+
+1. **Find the groups** on a PC, while packing. Group the splats by how they move over the whole
+   animation, not only by where they are: two parts that touch but move differently end up in
+   different groups. That gives a few hundred control points.
+2. **Bind each splat once:** up to 4 nearest control points and their weights, 12 bytes per
+   splat, stored once. Splats near a joint blend between the groups, so there is no seam.
+3. **Per frame, store only the deltas:** for each control point, its change in rotation,
+   position and colour (brightness and tint) since the last frame. That is about 10 bytes. A group
+   that didn't move stores nothing.
+4. **A full frame every second,** like the key frames in video. Without it, rounding errors would
+   add up over a chain of deltas, and you couldn't jump into the middle of a chain. With it, the
+   loop can restart and a timeline can seek.
+5. **Check while packing.** The packer measures how far each splat lands from its real position in
+   every frame. A splat that misses by more than a limit (say 2 mm, or half its own size) gets its
+   own track. If many miss, the packer adds control points.
+6. **What groups don't fit:** fire, smoke, liquid, and splats that appear or fade out. These use
+   per-splat tracks, or a per-group opacity change.
 
 ## Size budget
 
-A 50,000-splat object, in a 10-second loop:
+A 30,000-splat object, in a 10-second loop at 30 fps:
 
 | Stored as | Size |
 |---|---|
-| every frame in full, 30 fps (16 bytes x 50,000 x 300) | about 240 MB: too big for a phone |
-| the movement only, 5 key frames per second (10 bytes x 50,000 x 50) | about 25 MB |
-| the same, with 30% of the splats moving | about 8 MB |
+| every splat, every frame (16 bytes x 30,000 x 300) | about 144 MB: too big for a phone |
+| every splat's movement, 5 key frames per second (10 bytes x 30,000 x 50) | about 15 MB |
+| **groups and deltas:** 500 control points, every frame | **about 2.5 MB** |
 
-Downloads and Safari's memory limit break first, not speed. Effort to make the files smaller is
-worth more than effort to make the code faster.
+The 2.5 MB is made up of:
+- the splats once: 480 KB;
+- their bindings: 360 KB;
+- a full frame every second: 80 KB;
+- the deltas, 10 bytes x 500 x 290 frames: 1.5 MB.
+
+It is less when parts stand still, because still groups store nothing.
 
 ## Speed (measured)
 
 Measured on the 4-core x86-64 virtual machine, in Node 22 (V8). A phone hasn't been measured. The
 work runs in the background thread, so drawing doesn't wait for it.
 
-| Splats | Blend positions between key frames | Re-sort | Total | 60 fps (16.7 ms)? |
-|---|---|---|---|---|
-| 50,000 | 0.24 ms | 0.9 ms | about 1 ms | easily |
-| 345,000 | 1.8 ms | 6.2 ms | about 8 ms | yes |
-| 865,000 | 4.5 ms | 14 ms | about 18.5 ms | just under; 30 fps is easy |
+The GPU draws each splat from all 4 of its control points, in the vertex shader. The CPU needs the
+positions only for the sort, and the sort only needs the order. The nearest control point almost
+always gets that right, so the sort uses it alone:
 
-The GPU draws a moving splat at the same cost as a still one. The AR tracking has its own thread
-(about 2 ms per camera frame), so the two don't compete. The sort times are from
-[AR.md](AR.md#speeds).
+| Splats | Positions for the sort (nearest control point) | Re-sort | Total | Fits |
+|---|---|---|---|---|
+| 50,000 | 0.6 ms | 0.9 ms | 1.5 ms | 60 fps, easily |
+| 345,000 | 4.5 ms | 6.2 ms | 10.7 ms | 60 fps |
+| 865,000 | 11.0 ms | 14 ms | 25 ms | 30 fps |
+
+For comparison:
+- **All 4 control points on the CPU:** 1.7 / 12.6 / 33 ms. That's exact, but more than the sort
+  needs.
+- **Per-splat key frames:** blending them takes 0.24 / 1.8 / 4.5 ms. That's cheaper on the CPU, but
+  the files are 6 times bigger.
+
+The AR tracking has its own thread (about 2 ms per camera frame), so the two don't compete. The
+sort times are from [AR.md](AR.md#speeds).
 
 ## Playback
 
-1. **Load:** download the still part, then the key frames in order, with a progress bar. Start
-   playing once the first second is in.
-2. **Draw:** the two key frames around the current time sit in GPU textures. The vertex shader
-   blends them, the same way the light matching edits splats.
-3. **Sort:** the background thread blends the same positions and re-sorts every frame while the
-   animation plays. A large scene can sort every second frame: the order changes little in 33 ms.
+1. **Load:** download the splats and their bindings, then the frames in order, with a progress
+   bar. Start playing once the first second is in.
+2. **Draw:** each frame, apply the deltas to the control points (a few hundred transforms, done
+   on the main thread). Put them in a small GPU texture. The vertex shader moves each splat by its
+   4 control points and applies the colour change, the same way the light matching edits splats.
+3. **Sort:** the background thread moves the splats by their nearest control point and re-sorts
+   every frame while the animation plays. A large scene can sort every second frame: the order
+   changes little in 33 ms.
 4. **Controls:** play/pause, loop and speed. In AR the scene is placed, slid, resized and turned
    as now. The contact shadow uses the first frame's footprint.
 
@@ -108,13 +138,15 @@ Limits of this path:
 
 ## Tests (plan)
 
-- **Packing round trip:** pack a `.ply` sequence, then decode and blend it. Check against NumPy
-  at several times, including between key frames.
-- **Sort:** sorting while playing gives the same order as sorting the blended positions with
-  NumPy.
+- **Packing round trip:** pack a `.ply` sequence into groups and deltas, then play it back. Every
+  splat must land within the packer's limit of its real position in every frame, checked with
+  NumPy. This includes splats near joints and a jump into the middle of the loop.
+- **Sort:** sorting by the nearest control point gives nearly the same order as sorting the
+  exact positions. Measure how many pairs are swapped, and how far apart those are.
 - **The page:** in headless Chromium the animation loads, plays and loops, and can be placed in
   AR with no script errors. This joins `tests/test_browser.py`, which runs before every deploy.
-- **Sizes:** check the file size against the budget above for a test animation.
+- **Sizes:** check the file size against the budget above for a test animation, with and
+  without still parts.
 
 ## Others that already play animated splats on the web
 
