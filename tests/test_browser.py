@@ -37,8 +37,9 @@ class ARPage(unittest.TestCase):
             result = asyncio.run(self.run_page(f"http://127.0.0.1:{server.server_address[1]}"))
         finally:
             server.shutdown()
-        self.assertEqual(result["errors"], [])
-        self.assertIn("Tap to put it on the", result["ring_hint"])
+        self.assertEqual(result["errors"], [], result)
+        self.assertTrue(result["ar_on"], result)
+        self.assertIn("Tap to put it on the", result["ring_hint"], result)
         self.assertIsNotNone(result["placed"])
         self.assertIn("Walk around it", result["placed_hint"])
         self.assertNotIn("went wrong", result["status"])
@@ -47,13 +48,15 @@ class ARPage(unittest.TestCase):
         args = ["--enable-unsafe-swiftshader", "--use-angle=swiftshader", "--ignore-gpu-blocklist",
                 "--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"]
         async with async_playwright() as p:
-            kw = {"executable_path": CHROME} if os.path.exists(CHROME) else {}
+            # the full Chromium (not the stripped-down headless shell), in its new headless mode
+            kw = {"executable_path": CHROME} if os.path.exists(CHROME) else {"channel": "chromium"}
             browser = await p.chromium.launch(args=args, **kw)
             ctx = await browser.new_context(viewport={"width": 393, "height": 852}, is_mobile=True, has_touch=True)
             await ctx.grant_permissions(["camera"], origin=origin)
             page = await ctx.new_page()
-            errors = []
+            errors, console = [], []
             page.on("pageerror", lambda e: errors.append(str(e)))
+            page.on("console", lambda m: console.append(f"{m.type}: {m.text}"))
             await page.goto(origin + "/index.html?still=1&debug#unicorn")
             for _ in range(120):
                 d = await page.text_content("#drawn")
@@ -70,7 +73,11 @@ class ARPage(unittest.TestCase):
             await page.mouse.click(196, 300)
             await page.wait_for_timeout(1500)
             result = {"errors": errors, "ring_hint": ring_hint, "placed": await page.evaluate("ar.placed"),
-                      "placed_hint": await hint(), "status": await page.text_content("#status") or ""}
+                      "placed_hint": await hint(), "status": await page.text_content("#status") or "",
+                      "ar_on": await page.evaluate("ar.on"),
+                      "note": await page.evaluate("document.getElementById('ar-note').hidden ? '' : "
+                                                  "document.getElementById('ar-note').textContent.trim()"),
+                      "readings": await page.evaluate("ar.motionEvents"), "console": console[-10:]}
             await browser.close()
             return result
 
