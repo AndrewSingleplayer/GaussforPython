@@ -173,6 +173,10 @@ recorded on it. Everything else above comes from simulations and a desktop brows
    "upload a capture, get a link and a QR code".
 7. **Analytics.** How many visitors open it, for how long, and which phones fail.
 8. **Wider recovery.** Recovery only works over floor the phone has already seen.
+9. **Less work per frame, based on where the camera is,** and **motion blur that matches the
+   camera image.** Both help still scenes as well: level of detail by size on screen, skipping
+   splats hidden from the viewing direction, and blur driven by the phone's movement. See
+   [4D-SPLATS.md, "To be added: next ideas"](4D-SPLATS.md#to-be-added-next-ideas).
 
 **Occlusion (later):**
 

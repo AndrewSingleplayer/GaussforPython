@@ -113,6 +113,82 @@ sort times are from [AR.md](AR.md#speeds).
 4. **Controls:** play/pause, loop and speed. In AR the scene is placed, slid, resized and turned
    as now. The contact shadow uses the first frame's footprint.
 
+## To be added: next ideas
+
+Ideas from xplor3d for after the playback above works. None of them is built or measured yet.
+
+### 1. Groups and deltas
+
+Store the motion per group of splats, not per splat. See
+[How the motion is stored](#how-the-motion-is-stored-groups-and-deltas-plan) above.
+
+### 2. A 4DGS optimiser that knows where the motion ruptures
+
+The number of splats should stay close to the base count. An animation of 30,000 splats over 30
+frames isn't 900,000 splats. It is 30,000 splats plus the deltas, plus a few thousand extra splats
+only where the motion breaks: about 31-40k in all.
+
+- **Find the ruptures while packing.** A rupture is any of:
+  - a place where a group's motion misses a splat's real position;
+  - neighbouring splats that start moving apart (a tear, a split, a lid opening);
+  - a colour change that a group's colour delta can't explain (a light switching on, a crystal
+    catching a reflection).
+- **Add splats only there,** each with a lifespan: a start frame, an end frame, and a fade in and
+  out. That costs a few bytes per splat. The vertex shader hides splats outside their lifespan,
+  and the sort skips them.
+- **Limit:** a surface that appears for the first time, such as the inside of a geode as it
+  opens, can only look right if the capture saw it. The optimiser can place splats there, but it
+  can't invent what they look like.
+
+### 3. Motion blur, done while drawing
+
+Each splat is an ellipse on screen. The vertex shader knows where the splat is now and where it
+was a frame ago, from the deltas. So it can stretch the ellipse along its own on-screen movement
+during the exposure: add `v vᵀ` (times a constant) to the ellipse's 2D covariance, where `v` is
+that movement. Then it scales the opacity by `sqrt(det Σ / det Σ')`, which keeps the splat's
+total brightness the same.
+
+- **Local by construction:** still parts stay sharp, and only moving parts streak.
+- **No extra pass and no velocity buffer,** unlike a post-process blur. Capping the stretch
+  bounds the extra pixel work during fast movement.
+- **In AR this helps still scenes too.** When the phone moves, the real camera image blurs, but
+  the splats stay sharp, which is part of why they look pasted on. Driving the stretch with the
+  phone's own movement (tracking and gyroscope) and the camera's exposure (about 1/60 s indoors)
+  makes the scene blur like the image around it.
+
+### 4. Viewer: less work, based on where the camera is
+
+Already done:
+- splats outside the view are skipped;
+- the sort runs only when the camera moves;
+- the resolution, then the number of splats, drop when the frame rate does;
+- nothing is redrawn while nothing moves.
+
+Next:
+- **Detail by size on screen (level of detail).** While packing, build coarser versions of the
+  scene by merging neighbouring small splats into bigger ones. At runtime, pick the level where a
+  splat covers about one pixel. A far-away object (2-3 m away in AR) draws a fraction of its
+  splats, and walking closer brings the detail back. Merge rather than drop: many tiny splats
+  together make up the texture.
+- **Skipping hidden splats by viewing direction.** For a solid object, the splats on the far
+  side are covered by the front ones and add nothing.
+  - While packing, render the object from 32 directions.
+  - Give each splat one bit per direction: visible from there or not. That's 4 bytes per splat, a
+    quarter more download.
+  - At runtime, the sort and the draw skip splats hidden from the camera's direction.
+  - To avoid holes, use the neighbouring directions too, and be cautious close up.
+- **A budget from the size on screen.** The object's size on screen is known from the camera's
+  distance, so set the number of splats from it directly, instead of waiting for the frame rate to
+  drop.
+- **Sort for where the phone will be.** In AR the gyroscope says where the phone is turning, so
+  sort for the predicted position. Then the order is fresh when it arrives.
+- **Skip the sort for tiny moves:** below a fraction of a degree the order hasn't really changed.
+- **Measure each one** on the six scenes (`research/analyze_scenes.py`) before shipping it. The
+  gains depend on the scene.
+
+These cost work at packing time and almost nothing on the phone. That is the right trade: the
+phone is the weak side.
+
 ## Later: the GPU path (HA++ → WebGPU)
 
 For millions of moving splats, the blend and the sort move to the GPU. HA++ already has a GPU
